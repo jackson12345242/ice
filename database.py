@@ -1,8 +1,7 @@
 import aiosqlite
 from config import BRAINROTS
 
-DB_PATH = "brainrot_bot.db"
-
+'DB_PATH = "/data/brainrot_bot.db
 
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
