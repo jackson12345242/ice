@@ -64,6 +64,15 @@ async def init_db():
             )
             """
         )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS used_tx_ids (
+                tx_id TEXT PRIMARY KEY,
+                split_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL
+            )
+            """
+        )
         # seed rows so we can always UPDATE instead of worrying about INSERT-vs-UPDATE
         for key in BRAINROTS:
             await db.execute(
@@ -205,6 +214,32 @@ async def get_split_payment(split_id: int, user_id: int):
         if row is None:
             return None
         return {"paid": bool(row[0]), "tx_id": row[1], "amount_paid": row[2], "coin": row[3]}
+
+
+async def is_tx_used(tx_id: str) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("SELECT 1 FROM used_tx_ids WHERE tx_id = ?", (tx_id,))
+        row = await cursor.fetchone()
+        return row is not None
+
+
+async def mark_tx_used(tx_id: str, split_id: int, user_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO used_tx_ids (tx_id, split_id, user_id) VALUES (?, ?, ?)",
+            (tx_id, split_id, user_id),
+        )
+        await db.commit()
+
+
+async def get_split_summary(split_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT user_id, amount_paid, coin, tx_id FROM split_payments WHERE split_id = ? AND paid = 1",
+            (split_id,),
+        )
+        rows = await cursor.fetchall()
+        return [{"user_id": r[0], "amount_paid": r[1], "coin": r[2], "tx_id": r[3]} for r in rows]
 
 
 async def end_split(split_id: int):
