@@ -72,7 +72,7 @@ async def find_ltc_payment(receiver_address: str, sender_address: str, min_usd: 
             if receiver_address in (out.get("addresses") or []):
                 amount_ltc = out.get("value", 0) / 1e8
                 amount_usd = amount_ltc * price
-                if amount_usd >= min_usd * (1 - tolerance):
+                if abs(amount_usd - min_usd) <= min_usd * tolerance:
                     return tx.get("hash"), amount_usd
     return None
 
@@ -113,7 +113,7 @@ async def find_usdt_bep20_payment(receiver_address: str, sender_address: str, mi
             continue
         decimals = int(tx.get("tokenDecimal", 18))
         amount_usdt = int(tx.get("value", "0")) / (10 ** decimals)
-        if amount_usdt >= min_usd * (1 - tolerance):
+        if abs(amount_usdt - min_usd) <= min_usd * tolerance:
             return tx.get("hash"), amount_usdt
     return None
 
