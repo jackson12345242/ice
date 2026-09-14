@@ -207,6 +207,21 @@ async def get_split_payment(split_id: int, user_id: int):
         return {"paid": bool(row[0]), "tx_id": row[1], "amount_paid": row[2], "coin": row[3]}
 
 
+async def end_split(split_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE splits SET status = 'ended' WHERE id = ?", (split_id,))
+        await db.commit()
+
+
+async def get_split_paid_users(split_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT user_id FROM split_payments WHERE split_id = ? AND paid = 1", (split_id,)
+        )
+        rows = await cursor.fetchall()
+        return [r[0] for r in rows]
+
+
 async def mark_split_payment(split_id: int, user_id: int, tx_id: str, amount_paid: float, coin: str):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
