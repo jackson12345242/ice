@@ -293,10 +293,19 @@ class Split(commands.Cog):
             except discord.HTTPException:
                 creator = None
         if creator is not None:
-            dm_embed = discord.Embed(title="Split Payment Received", color=EMBED_COLOR)
+            if used_coin == "LTC":
+                explorer_url = f"https://live.blockcypher.com/ltc/tx/{tx_id}/"
+            elif used_coin == "USDT":
+                explorer_url = f"https://bscscan.com/tx/{tx_id}"
+            else:
+                explorer_url = None
+
+            dm_embed = discord.Embed(title="Split Payment Received", color=EMBED_COLOR, url=explorer_url)
             dm_embed.add_field(name="Paid by", value=user.display_name, inline=False)
             dm_embed.add_field(name="Amount", value=f"${amount_paid:,.2f} ({used_coin})", inline=True)
             dm_embed.add_field(name="Transaction ID", value=f"`{tx_id}`", inline=False)
+            if explorer_url:
+                dm_embed.add_field(name="View Transaction", value=explorer_url, inline=False)
             try:
                 await creator.send(embed=dm_embed)
             except discord.HTTPException:
