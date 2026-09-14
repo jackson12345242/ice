@@ -7,7 +7,6 @@ from discord.ext import commands
 
 import database as db
 from config import (
-    BRAINROTS,
     EMBED_COLOR,
     SPLIT_TEAM_SIZE,
     BLOCKCYPHER_TOKEN,
@@ -17,10 +16,6 @@ from config import (
     SPLIT_PAYMENT_WINDOW_MINUTES,
 )
 from wallet import WalletView
-
-BRAINROT_CHOICES = [
-    app_commands.Choice(name=info["label"], value=key) for key, info in BRAINROTS.items()
-]
 
 
 async def get_ltc_usd_price() -> float:
@@ -33,9 +28,9 @@ async def get_ltc_usd_price() -> float:
             return float(data["litecoin"]["usd"])
 
 
-async def find_ltc_payment(receiver_address: str, sender_address: str, min_usd: float, tolerance: float):
-    """Look for a RECENT incoming LTC tx to receiver_address whose input includes sender_address,
-    worth at least min_usd (with tolerance). Returns (tx_id, amount_usd) or None."""
+async def find_ltc_payments(receiver_address: str, sender_address: str, min_usd: float, tolerance: float):
+    """Return every RECENT incoming LTC tx to receiver_address from sender_address that lands
+    within the tolerance band of min_usd, most recent first: [(tx_id, amount_usd), ...]."""
     price = await get_ltc_usd_price()
     cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
         minutes=SPLIT_PAYMENT_WINDOW_MINUTES
@@ -49,9 +44,10 @@ async def find_ltc_payment(receiver_address: str, sender_address: str, min_usd: 
     async with aiohttp.ClientSession() as session:
         async with session.get(url, params=params) as resp:
             if resp.status != 200:
-                return None
+                return []
             data = await resp.json()
 
+    matches = []
     for tx in data.get("txs", []):
         ts_raw = tx.get("confirmed") or tx.get("received")
         if not ts_raw:
@@ -68,18 +64,19 @@ async def find_ltc_payment(receiver_address: str, sender_address: str, min_usd: 
             input_addrs.update(i.get("addresses", []) or [])
         if sender_address not in input_addrs:
             continue
+
         for out in tx.get("outputs", []):
             if receiver_address in (out.get("addresses") or []):
                 amount_ltc = out.get("value", 0) / 1e8
                 amount_usd = amount_ltc * price
                 if abs(amount_usd - min_usd) <= min_usd * tolerance:
-                    return tx.get("hash"), amount_usd
-    return None
+                    matches.append((tx.get("hash"), amount_usd))
+    return matches
 
 
-async def find_usdt_bep20_payment(receiver_address: str, sender_address: str, min_usd: float, tolerance: float):
-    """Look for a RECENT incoming USDT (BEP20) transfer to receiver_address from sender_address,
-    worth at least min_usd (with tolerance). Returns (tx_id, amount_usd) or None."""
+async def find_usdt_bep20_payments(receiver_address: str, sender_address: str, min_usd: float, tolerance: float):
+    """Return every RECENT incoming USDT (BEP20) transfer to receiver_address from sender_address
+    that lands within the tolerance band of min_usd, most recent first: [(tx_id, amount_usd), ...]."""
     cutoff_ts = int(
         (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=SPLIT_PAYMENT_WINDOW_MINUTES)).timestamp()
     )
@@ -99,6 +96,7 @@ async def find_usdt_bep20_payment(receiver_address: str, sender_address: str, mi
         async with session.get(url, params=params) as resp:
             data = await resp.json()
 
+    matches = []
     for tx in data.get("result", []) or []:
         try:
             tx_ts = int(tx.get("timeStamp", "0"))
@@ -111,11 +109,12 @@ async def find_usdt_bep20_payment(receiver_address: str, sender_address: str, mi
             continue
         if tx.get("to", "").lower() != receiver_address.lower():
             continue
+
         decimals = int(tx.get("tokenDecimal", 18))
         amount_usdt = int(tx.get("value", "0")) / (10 ** decimals)
         if abs(amount_usdt - min_usd) <= min_usd * tolerance:
-            return tx.get("hash"), amount_usdt
-    return None
+            matches.append((tx.get("hash"), amount_usdt))
+    return matches
 
 
 class Split(commands.Cog):
@@ -129,26 +128,26 @@ class Split(commands.Cog):
         brainrot="Which brainrot this split is for",
         total="Total cost to split",
     )
-    @app_commands.choices(brainrot=BRAINROT_CHOICES)
     async def split_start(
         self,
         interaction: discord.Interaction,
-        brainrot: app_commands.Choice[str],
+        brainrot: str,
         total: float,
     ):
         existing = await db.get_active_split()
         if existing is not None:
             await interaction.response.send_message(
-                "There's already an active split. Finish it out with `/split complete` for everyone first.",
+                "There's already an active split. End it with `/split end` before starting a new one.",
                 ephemeral=True,
             )
             return
 
+        brainrot = brainrot.strip()
         per_person = total / SPLIT_TEAM_SIZE
 
         split_id = await db.create_split(
             creator_id=interaction.user.id,
-            brainrot=brainrot.value,
+            brainrot=brainrot,
             total_amount=total,
             team_size=SPLIT_TEAM_SIZE,
             channel_id=interaction.channel_id,
@@ -158,7 +157,7 @@ class Split(commands.Cog):
 
         embed = discord.Embed(title="💸 New Split Started", color=EMBED_COLOR)
         embed.add_field(name="Started by", value=interaction.user.mention, inline=False)
-        embed.add_field(name="Brainrot", value=brainrot.name, inline=True)
+        embed.add_field(name="Brainrot", value=brainrot, inline=True)
         embed.add_field(name="Total Cost", value=f"${total:,.2f}", inline=True)
         embed.add_field(name="Split Between", value=f"{SPLIT_TEAM_SIZE} people", inline=True)
         embed.add_field(name="Each Person Pays", value=f"${per_person:,.2f}", inline=False)
@@ -190,18 +189,15 @@ class Split(commands.Cog):
             return
 
         await db.end_split(split["id"])
-        paid_ids = await db.get_split_paid_users(split["id"])
+        summary = await db.get_split_summary(split["id"])
 
         embed = discord.Embed(title="🏁 Split Ended", color=EMBED_COLOR)
-        embed.add_field(name="Brainrot", value=BRAINROTS[split["brainrot"]]["label"], inline=True)
+        embed.add_field(name="Brainrot", value=split["brainrot"], inline=True)
         embed.add_field(name="Total Cost", value=f"${split['total_amount']:,.2f}", inline=True)
-        embed.add_field(name="Paid", value=f"{len(paid_ids)} / {split['team_size']}", inline=True)
-        if paid_ids:
-            embed.add_field(
-                name="Confirmed payers",
-                value="\n".join(f"<@{uid}>" for uid in paid_ids),
-                inline=False,
-            )
+        embed.add_field(name="Paid", value=f"{len(summary)} / {split['team_size']}", inline=True)
+        if summary:
+            lines = [f"<@{p['user_id']}> — ${p['amount_paid']:,.2f} ({p['coin']})" for p in summary]
+            embed.add_field(name="Confirmed payers", value="\n".join(lines), inline=False)
         else:
             embed.add_field(name="Confirmed payers", value="No one confirmed yet.", inline=False)
 
@@ -249,14 +245,19 @@ class Split(commands.Cog):
                 if pw["coin"] != cw["coin"]:
                     continue
                 if pw["coin"] == "LTC":
-                    found = await find_ltc_payment(cw["address"], pw["address"], per_person, SPLIT_PAYMENT_TOLERANCE)
+                    candidates = await find_ltc_payments(cw["address"], pw["address"], per_person, SPLIT_PAYMENT_TOLERANCE)
                 elif pw["coin"] == "USDT":
-                    found = await find_usdt_bep20_payment(cw["address"], pw["address"], per_person, SPLIT_PAYMENT_TOLERANCE)
+                    candidates = await find_usdt_bep20_payments(cw["address"], pw["address"], per_person, SPLIT_PAYMENT_TOLERANCE)
                 else:
-                    found = None
-                if found:
-                    result = found
+                    candidates = []
+
+                for tx_id, amount_usd in candidates:
+                    if await db.is_tx_used(tx_id):
+                        continue  # this exact transaction already credited someone else — skip it
+                    result = (tx_id, amount_usd)
                     used_coin = pw["coin"]
+                    break
+                if result:
                     break
             if result:
                 break
@@ -264,14 +265,15 @@ class Split(commands.Cog):
         if not result:
             await interaction.edit_original_response(
                 content=(
-                    f"Couldn't find a matching payment of at least ${per_person:,.2f} "
-                    f"from {user.display_name} yet. Try again in a few minutes."
+                    f"Couldn't find a matching, unused payment of about ${per_person:,.2f} "
+                    f"from {user.display_name}'s saved address yet. Try again in a few minutes."
                 )
             )
             return
 
         tx_id, amount_paid = result
         await db.mark_split_payment(split["id"], user.id, tx_id, amount_paid, used_coin)
+        await db.mark_tx_used(tx_id, split["id"], user.id)
 
         await interaction.edit_original_response(
             content=f"✅ Verified — {user.display_name}'s payment is confirmed."
@@ -292,7 +294,11 @@ class Split(commands.Cog):
                 creator = await self.bot.fetch_user(split["creator_id"])
             except discord.HTTPException:
                 creator = None
+
         if creator is not None:
+            summary = await db.get_split_summary(split["id"])
+            total_received = sum(p["amount_paid"] for p in summary)
+
             if used_coin == "LTC":
                 explorer_url = f"https://live.blockcypher.com/ltc/tx/{tx_id}/"
             elif used_coin == "USDT":
@@ -301,11 +307,21 @@ class Split(commands.Cog):
                 explorer_url = None
 
             dm_embed = discord.Embed(title="Split Payment Received", color=EMBED_COLOR, url=explorer_url)
-            dm_embed.add_field(name="Paid by", value=user.display_name, inline=False)
+            dm_embed.add_field(name="Brainrot", value=split["brainrot"], inline=False)
+            dm_embed.add_field(name="Paid by", value=user.display_name, inline=True)
             dm_embed.add_field(name="Amount", value=f"${amount_paid:,.2f} ({used_coin})", inline=True)
             dm_embed.add_field(name="Transaction ID", value=f"`{tx_id}`", inline=False)
             if explorer_url:
                 dm_embed.add_field(name="View Transaction", value=explorer_url, inline=False)
+            dm_embed.add_field(
+                name="Received So Far (this split)",
+                value=f"${total_received:,.2f} / ${split['total_amount']:,.2f} — {len(summary)}/{split['team_size']} paid",
+                inline=False,
+            )
+            if summary:
+                payer_lines = [f"<@{p['user_id']}> — ${p['amount_paid']:,.2f} ({p['coin']})" for p in summary]
+                dm_embed.add_field(name="People who've paid", value="\n".join(payer_lines), inline=False)
+
             try:
                 await creator.send(embed=dm_embed)
             except discord.HTTPException:
