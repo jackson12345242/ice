@@ -42,7 +42,7 @@ async def find_ltc_payment(receiver_address: str, sender_address: str, min_usd: 
     )
 
     url = f"https://api.blockcypher.com/v1/ltc/main/addrs/{receiver_address}/full"
-    params = {"limit": 50}
+    params = {"limit": 50, "confirmations": 0}
     if BLOCKCYPHER_TOKEN:
         params["token"] = BLOCKCYPHER_TOKEN
 
