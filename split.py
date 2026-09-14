@@ -155,6 +155,31 @@ class Split(commands.Cog):
         await db.set_split_message(split_id, message.id)
         await interaction.response.send_message("Split started!", ephemeral=True)
 
+    @split_group.command(name="end", description="End the active split")
+    async def split_end(self, interaction: discord.Interaction):
+        split = await db.get_active_split()
+        if split is None:
+            await interaction.response.send_message("There's no active split right now.", ephemeral=True)
+            return
+
+        await db.end_split(split["id"])
+        paid_ids = await db.get_split_paid_users(split["id"])
+
+        embed = discord.Embed(title="🏁 Split Ended", color=EMBED_COLOR)
+        embed.add_field(name="Brainrot", value=BRAINROTS[split["brainrot"]]["label"], inline=True)
+        embed.add_field(name="Total Cost", value=f"${split['total_amount']:,.2f}", inline=True)
+        embed.add_field(name="Paid", value=f"{len(paid_ids)} / {split['team_size']}", inline=True)
+        if paid_ids:
+            embed.add_field(
+                name="Confirmed payers",
+                value="\n".join(f"<@{uid}>" for uid in paid_ids),
+                inline=False,
+            )
+        else:
+            embed.add_field(name="Confirmed payers", value="No one confirmed yet.", inline=False)
+
+        await interaction.response.send_message(embed=embed)
+
     @split_group.command(name="complete", description="Mark a person's share of the active split as paid")
     @app_commands.describe(user="The person who paid their share")
     async def split_complete(self, interaction: discord.Interaction, user: discord.Member):
