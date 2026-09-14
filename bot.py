@@ -12,7 +12,7 @@ logging.basicConfig(level=logging.INFO)
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-INITIAL_COGS = ["wallet", "fund"]
+INITIAL_COGS = ["wallet", "fund", "split"]
 
 
 @bot.event
