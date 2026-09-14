@@ -1,3 +1,5 @@
+import datetime
+
 import aiohttp
 import discord
 from discord import app_commands
@@ -12,6 +14,7 @@ from config import (
     BSCSCAN_API_KEY,
     USDT_BEP20_CONTRACT,
     SPLIT_PAYMENT_TOLERANCE,
+    SPLIT_PAYMENT_WINDOW_MINUTES,
 )
 from wallet import WalletView
 
@@ -31,9 +34,12 @@ async def get_ltc_usd_price() -> float:
 
 
 async def find_ltc_payment(receiver_address: str, sender_address: str, min_usd: float, tolerance: float):
-    """Look for an incoming LTC tx to receiver_address whose input includes sender_address,
+    """Look for a RECENT incoming LTC tx to receiver_address whose input includes sender_address,
     worth at least min_usd (with tolerance). Returns (tx_id, amount_usd) or None."""
     price = await get_ltc_usd_price()
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
+        minutes=SPLIT_PAYMENT_WINDOW_MINUTES
+    )
 
     url = f"https://api.blockcypher.com/v1/ltc/main/addrs/{receiver_address}/full"
     params = {"limit": 50}
@@ -47,6 +53,16 @@ async def find_ltc_payment(receiver_address: str, sender_address: str, min_usd: 
             data = await resp.json()
 
     for tx in data.get("txs", []):
+        ts_raw = tx.get("confirmed") or tx.get("received")
+        if not ts_raw:
+            continue
+        try:
+            tx_time = datetime.datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if tx_time < cutoff:
+            continue
+
         input_addrs = set()
         for i in tx.get("inputs", []):
             input_addrs.update(i.get("addresses", []) or [])
@@ -62,8 +78,12 @@ async def find_ltc_payment(receiver_address: str, sender_address: str, min_usd: 
 
 
 async def find_usdt_bep20_payment(receiver_address: str, sender_address: str, min_usd: float, tolerance: float):
-    """Look for an incoming USDT (BEP20) transfer to receiver_address from sender_address,
+    """Look for a RECENT incoming USDT (BEP20) transfer to receiver_address from sender_address,
     worth at least min_usd (with tolerance). Returns (tx_id, amount_usd) or None."""
+    cutoff_ts = int(
+        (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=SPLIT_PAYMENT_WINDOW_MINUTES)).timestamp()
+    )
+
     url = "https://api.bscscan.com/api"
     params = {
         "module": "account",
@@ -80,6 +100,13 @@ async def find_usdt_bep20_payment(receiver_address: str, sender_address: str, mi
             data = await resp.json()
 
     for tx in data.get("result", []) or []:
+        try:
+            tx_ts = int(tx.get("timeStamp", "0"))
+        except ValueError:
+            continue
+        if tx_ts < cutoff_ts:
+            continue
+
         if tx.get("from", "").lower() != sender_address.lower():
             continue
         if tx.get("to", "").lower() != receiver_address.lower():
