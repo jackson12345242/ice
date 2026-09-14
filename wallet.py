@@ -12,9 +12,7 @@ class AddressButton(discord.ui.Button):
         self.address = address
 
     async def callback(self, interaction: discord.Interaction):
-        await interaction.response.send_message(
-            f"`{self.address}`", ephemeral=True
-        )
+        await interaction.response.send_message(self.address, ephemeral=True)
 
 
 class WalletView(discord.ui.View):
