@@ -30,6 +30,7 @@ EMBED_COLOR = 0x5865F2  # Discord blurple, matches the reference screenshot
 SPLIT_TEAM_SIZE = 13  # <-- update this whenever the team size changes
 SPLIT_LOG_CHANNEL_ID = FUND_LOG_CHANNEL_ID  # change this if you want splits logged somewhere else
 SPLIT_PAYMENT_TOLERANCE = 0.03  # 3% wiggle room for price moves / network fees
+SPLIT_PAYMENT_WINDOW_MINUTES = 15  # only count transactions within this many minutes of now
 
 # --- Blockchain lookups ---
 BLOCKCYPHER_TOKEN = os.getenv("BLOCKCYPHER_TOKEN", "")
