@@ -12,11 +12,6 @@ BRAINROT_CHOICES = [
     app_commands.Choice(name=info["label"], value=key) for key, info in PAYMENT_BRAINROTS.items()
 ]
 
-DIRECTION_CHOICES = [
-    app_commands.Choice(name="Received", value="received"),
-    app_commands.Choice(name="Paid", value="paid"),
-]
-
 REMOVE_TYPE_CHOICES = [
     app_commands.Choice(name="Brainrot Received", value="brainrot_received"),
     app_commands.Choice(name="Brainrot Paid", value="brainrot_paid"),
@@ -28,13 +23,13 @@ _KNOWN_LABELS = {
 }
 
 
-def resolve_brainrot(choice_value: str, other_name: str = ""):
+def resolve_brainrot(choice_value: str, brainrot_name: str = ""):
     """Returns (key, display_label). If 'other' was picked but the typed name closely
     matches a known brainrot, snap to that instead of creating a stray 'other' entry."""
     if choice_value != "other":
         return choice_value, PAYMENT_BRAINROTS[choice_value]["label"]
 
-    name = (other_name or "").strip()
+    name = (brainrot_name or "").strip()
     if name:
         match = difflib.get_close_matches(name, _KNOWN_LABELS.keys(), n=1, cutoff=0.6)
         if match:
@@ -63,6 +58,7 @@ class Payment(commands.Cog):
         self.bot = bot
 
     payment_group = app_commands.Group(name="payment", description="Track team payments")
+    log_group = app_commands.Group(name="log", description="Log a payment", parent=payment_group)
     brainrot_group = app_commands.Group(name="brainrot", description="Look up logged brainrots")
 
     async def _post_log(self, embed: discord.Embed):
@@ -101,50 +97,92 @@ class Payment(commands.Cog):
             line_num += 1
         return embeds, counter
 
-    # ---------------- /payment log ----------------
-    @payment_group.command(name="log", description="Log a brainrot payment (and optionally money)")
-    @app_commands.describe(
-        brainrot="Which brainrot",
-        direction="Whether this brainrot was received or paid",
-        quantity="How many (default 1)",
-        money="Optional money amount tied to this payment",
-        other_name="Name of the brainrot if you picked Other",
-        image="Optional proof screenshot",
-    )
-    @app_commands.choices(brainrot=BRAINROT_CHOICES, direction=DIRECTION_CHOICES)
-    async def payment_log(
+    async def _log_brainrot(
         self,
         interaction: discord.Interaction,
         brainrot: app_commands.Choice[str],
-        direction: app_commands.Choice[str],
-        quantity: int = 1,
-        money: float = None,
-        other_name: str = "",
-        image: discord.Attachment = None,
+        quantity: int,
+        brainrot_name: str,
+        proof: discord.Attachment,
+        direction: str,
     ):
-        key, label = resolve_brainrot(brainrot.value, other_name)
-        image_url = image.url if image else None
+        key, label = resolve_brainrot(brainrot.value, brainrot_name)
+        image_url = proof.url if proof else None
 
         await db.log_payment_brainrot(
-            interaction.user.id, key, label if key == "other" else None, quantity, image_url, direction.value
+            interaction.user.id, key, label if key == "other" else None, quantity, image_url, direction
         )
-        if money is not None:
-            await db.log_payment_money(interaction.user.id, money, image_url)
 
-        title = "🟢 Brainrot Received" if direction.value == "received" else "🔴 Brainrot Paid"
+        title = "🟢 Brainrot Received" if direction == "received" else "🔴 Brainrot Paid"
         embed = discord.Embed(title=title, color=EMBED_COLOR)
         embed.add_field(name="Logged by", value=interaction.user.mention, inline=False)
         embed.add_field(name="Brainrot", value=f"{quantity}x {label}", inline=True)
-        if money is not None:
-            embed.add_field(name="Money", value=f"${money:,.2f}", inline=True)
         if image_url:
             embed.set_image(url=image_url)
         embed.timestamp = discord.utils.utcnow()
 
-        confirmation = f"Logged {quantity}x {label} ({direction.name.lower()})"
-        if money is not None:
-            confirmation += f" and ${money:,.2f}"
-        await interaction.response.send_message(confirmation + ".", ephemeral=True)
+        verb = "received" if direction == "received" else "paid"
+        await interaction.response.send_message(f"Logged {quantity}x {label} {verb}.", ephemeral=True)
+        await self._post_log(embed)
+
+    # ---------------- /payment log brainrot_paid ----------------
+    @log_group.command(name="brainrot_paid", description="Log brainrots you paid out")
+    @app_commands.describe(
+        brainrot="Which brainrot",
+        quantity="How many (default 1)",
+        brainrot_name="Name of the brainrot if you picked Other",
+        proof="Optional proof screenshot",
+    )
+    @app_commands.choices(brainrot=BRAINROT_CHOICES)
+    async def log_brainrot_paid(
+        self,
+        interaction: discord.Interaction,
+        brainrot: app_commands.Choice[str],
+        quantity: int = 1,
+        brainrot_name: str = "",
+        proof: discord.Attachment = None,
+    ):
+        await self._log_brainrot(interaction, brainrot, quantity, brainrot_name, proof, "paid")
+
+    # ---------------- /payment log brainrot_received ----------------
+    @log_group.command(name="brainrot_received", description="Log brainrots you received")
+    @app_commands.describe(
+        brainrot="Which brainrot",
+        quantity="How many (default 1)",
+        brainrot_name="Name of the brainrot if you picked Other",
+        proof="Optional proof screenshot",
+    )
+    @app_commands.choices(brainrot=BRAINROT_CHOICES)
+    async def log_brainrot_received(
+        self,
+        interaction: discord.Interaction,
+        brainrot: app_commands.Choice[str],
+        quantity: int = 1,
+        brainrot_name: str = "",
+        proof: discord.Attachment = None,
+    ):
+        await self._log_brainrot(interaction, brainrot, quantity, brainrot_name, proof, "received")
+
+    # ---------------- /payment log money ----------------
+    @log_group.command(name="money", description="Log a money payment")
+    @app_commands.describe(amount="How much you paid", proof="Optional proof screenshot")
+    async def log_money(
+        self,
+        interaction: discord.Interaction,
+        amount: float,
+        proof: discord.Attachment = None,
+    ):
+        image_url = proof.url if proof else None
+        await db.log_payment_money(interaction.user.id, amount, image_url)
+
+        embed = discord.Embed(title="💵 Money Logged", color=EMBED_COLOR)
+        embed.add_field(name="Logged by", value=interaction.user.mention, inline=False)
+        embed.add_field(name="Amount", value=f"${amount:,.2f}", inline=True)
+        if image_url:
+            embed.set_image(url=image_url)
+        embed.timestamp = discord.utils.utcnow()
+
+        await interaction.response.send_message(f"Logged ${amount:,.2f}.", ephemeral=True)
         await self._post_log(embed)
 
     # ---------------- /payment view ----------------
