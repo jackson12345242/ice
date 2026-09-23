@@ -59,6 +59,25 @@ class Payment(commands.Cog):
 
     payment_group = app_commands.Group(name="payment", description="Track team payments")
     log_group = app_commands.Group(name="log", description="Log a payment", parent=payment_group)
+    brainrot_group = app_commands.Group(name="brainrot", description="Look up logged brainrots")
+
+    @brainrot_group.command(name="received", description="View what brainrots a user has received")
+    @app_commands.describe(user="Whose received brainrots to view (defaults to you)")
+    async def brainrot_received_view(self, interaction: discord.Interaction, user: discord.User = None):
+        target = user or interaction.user
+        received, _paid, _money_total = await db.get_payment_summary(target.id)
+
+        if not received:
+            await interaction.response.send_message(
+                f"{target.display_name} hasn't received any brainrots yet.", ephemeral=True
+            )
+            return
+
+        files = []
+        embeds, _counter = self._build_brainrot_section(
+            received, f"🟢 {target.display_name}'s Received Brainrots", files, 0
+        )
+        await interaction.response.send_message(embeds=embeds, files=files)
 
     async def _post_log(self, embed: discord.Embed):
         channel = self.bot.get_channel(PAYMENT_LOG_CHANNEL_ID)
@@ -157,6 +176,33 @@ class Payment(commands.Cog):
         await interaction.response.send_message(f"Logged ${amount:,.2f}.", ephemeral=True)
         await self._post_log(embed)
 
+    def _build_brainrot_section(self, totals: dict, heading: str, files: list, start_counter: int):
+        """Returns (embeds, next_counter) for one section (Received or Paid)."""
+        embeds = []
+        if not totals:
+            return embeds, start_counter
+        embeds.append(discord.Embed(description=f"**{heading}**", color=EMBED_COLOR))
+        counter = start_counter
+        line_num = 1
+        for entry in totals.values():
+            qty = entry["quantity"]
+            if qty <= 0:
+                continue
+            key = entry["key"]
+            label = entry["other_name"] if key == "other" else PAYMENT_BRAINROTS[key]["label"]
+            asset = PAYMENT_BRAINROTS.get(key, {}).get("asset")
+
+            e = discord.Embed(description=f"**{line_num}. {qty}x {label}**", color=EMBED_COLOR)
+            if asset and os.path.exists(asset):
+                counter += 1
+                fname = f"img{counter}_{os.path.basename(asset)}"
+                file = discord.File(asset, filename=fname)
+                files.append(file)
+                e.set_thumbnail(url=f"attachment://{fname}")
+            embeds.append(e)
+            line_num += 1
+        return embeds, counter
+
     # ---------------- /payment view ----------------
     @payment_group.command(name="view", description="View a user's logged payments")
     @app_commands.describe(user="Whose payments to view (defaults to you)")
@@ -178,34 +224,12 @@ class Payment(commands.Cog):
 
         embeds = [summary]
         files = []
-        file_counter = 0
+        counter = 0
 
-        def add_section(totals: dict, heading: str):
-            nonlocal file_counter
-            if not totals:
-                return
-            embeds.append(discord.Embed(description=f"**{heading}**", color=EMBED_COLOR))
-            line_num = 1
-            for entry in totals.values():
-                qty = entry["quantity"]
-                if qty <= 0:
-                    continue
-                key = entry["key"]
-                label = entry["other_name"] if key == "other" else PAYMENT_BRAINROTS[key]["label"]
-                asset = PAYMENT_BRAINROTS.get(key, {}).get("asset")
-
-                e = discord.Embed(description=f"**{line_num}. {qty}x {label}**", color=EMBED_COLOR)
-                if asset and os.path.exists(asset):
-                    file_counter += 1
-                    fname = f"img{file_counter}_{os.path.basename(asset)}"
-                    file = discord.File(asset, filename=fname)
-                    files.append(file)
-                    e.set_thumbnail(url=f"attachment://{fname}")
-                embeds.append(e)
-                line_num += 1
-
-        add_section(received, "🟢 Received")
-        add_section(paid, "🔴 Paid")
+        received_embeds, counter = self._build_brainrot_section(received, "🟢 Received", files, counter)
+        embeds.extend(received_embeds)
+        paid_embeds, counter = self._build_brainrot_section(paid, "🔴 Paid", files, counter)
+        embeds.extend(paid_embeds)
 
         await interaction.response.send_message(embeds=embeds, files=files)
 
@@ -223,25 +247,24 @@ class Payment(commands.Cog):
         raw_rows = await db.get_leaderboard_brainrot_rows()
         per_user = {}
         for user_id, key, other_name, qty, direction in raw_rows:
-            if not qty:
+            if not qty or direction != "paid":
                 continue
-            signed_qty = qty if direction != "paid" else -qty
             tier = PAYMENT_BRAINROTS.get(key, {}).get("tier", 0)
             entry = per_user.setdefault(user_id, {"score": 0, "counts": {}})
-            entry["score"] += signed_qty * tier
+            entry["score"] += qty * tier
             label = other_name if key == "other" else PAYMENT_BRAINROTS[key]["label"]
-            entry["counts"][label] = entry["counts"].get(label, 0) + signed_qty
+            entry["counts"][label] = entry["counts"].get(label, 0) + qty
 
         ranked = sorted(per_user.items(), key=lambda kv: kv[1]["score"], reverse=True)
-        brainrot_embed = discord.Embed(title="🧠 Brainrot Leaderboard (net received)", color=EMBED_COLOR)
+        brainrot_embed = discord.Embed(title="🧠 Brainrot Leaderboard (paid)", color=EMBED_COLOR)
         lines = []
         for i, (user_id, data) in enumerate(ranked[:15]):
-            nonzero = {label: c for label, c in data["counts"].items() if c != 0}
-            if not nonzero:
+            positive = {label: c for label, c in data["counts"].items() if c > 0}
+            if not positive:
                 continue
-            counts_str = ", ".join(f"{c:+d}x {label}" for label, c in nonzero.items())
+            counts_str = ", ".join(f"{c}x {label}" for label, c in positive.items())
             lines.append(f"{i + 1}. <@{user_id}> — {counts_str}")
-        brainrot_embed.description = "\n".join(lines) if lines else "No brainrots logged yet."
+        brainrot_embed.description = "\n".join(lines) if lines else "No brainrots paid yet."
 
         view = LeaderboardView(money_embed, brainrot_embed)
         await interaction.response.send_message(embed=money_embed, view=view)
