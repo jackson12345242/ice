@@ -36,3 +36,15 @@ SPLIT_PAYMENT_WINDOW_MINUTES = 15  # only count transactions within this many mi
 BLOCKCYPHER_TOKEN = os.getenv("BLOCKCYPHER_TOKEN", "")
 BSCSCAN_API_KEY = os.getenv("BSCSCAN_API_KEY", "")  # optional — public endpoint works fine without one
 USDT_BEP20_CONTRACT = "0x55d398326f99059fF775485246999027B3197955"
+
+# --- Payment tracking ---
+PAYMENT_LOG_CHANNEL_ID = 155211188756965798  # every /payment log goes here
+PAYMENT_ADMIN_USER_ID = FUND_ADMIN_USER_ID  # only this user can use /payment remove
+
+# tier = relative quality, used to weight the brainrot leaderboard (higher = better)
+PAYMENT_BRAINROTS = {
+    "dragon_cannelloni": {"label": "Dragon Cannelloni", "asset": "assets/dragon_cannelloni.png", "tier": 3},
+    "madundung": {"label": "Madundung", "asset": "assets/madundung.png", "tier": 2},
+    "garama": {"label": "Garama", "asset": "assets/garama.png", "tier": 1},
+    "other": {"label": "Other", "asset": None, "tier": 0},
+}
