@@ -73,6 +73,21 @@ async def init_db():
             )
             """
         )
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS payment_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                brainrot_key TEXT,
+                other_name TEXT,
+                quantity INTEGER,
+                amount REAL,
+                image_url TEXT,
+                logged_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            """
+        )
         # seed rows so we can always UPDATE instead of worrying about INSERT-vs-UPDATE
         for key in BRAINROTS:
             await db.execute(
@@ -270,3 +285,104 @@ async def mark_split_payment(split_id: int, user_id: int, tx_id: str, amount_pai
             (split_id, user_id, tx_id, amount_paid, coin),
         )
         await db.commit()
+
+
+# ---------- Payment logs ----------
+
+async def log_payment_brainrot(user_id: int, brainrot_key: str, other_name: str, quantity: int, image_url: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO payment_logs (user_id, kind, brainrot_key, other_name, quantity, amount, image_url)
+            VALUES (?, 'brainrot', ?, ?, ?, NULL, ?)
+            """,
+            (user_id, brainrot_key, other_name, quantity, image_url),
+        )
+        await db.commit()
+
+
+async def log_payment_money(user_id: int, amount: float, image_url: str = None):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO payment_logs (user_id, kind, brainrot_key, other_name, quantity, amount, image_url)
+            VALUES (?, 'money', NULL, NULL, NULL, ?, ?)
+            """,
+            (user_id, amount, image_url),
+        )
+        await db.commit()
+
+
+async def get_payment_summary(user_id: int):
+    """Returns (totals, money_total). totals is {group_key: {'key', 'other_name', 'quantity'}}."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT brainrot_key, other_name, quantity FROM payment_logs WHERE user_id = ? AND kind = 'brainrot'",
+            (user_id,),
+        )
+        rows = await cursor.fetchall()
+
+        cursor2 = await db.execute(
+            "SELECT COALESCE(SUM(amount), 0) FROM payment_logs WHERE user_id = ? AND kind = 'money'",
+            (user_id,),
+        )
+        money_row = await cursor2.fetchone()
+
+    totals = {}
+    for key, other_name, qty in rows:
+        group_key = key if key != "other" else f"other:{(other_name or 'Other').lower()}"
+        if group_key not in totals:
+            totals[group_key] = {"key": key, "other_name": other_name, "quantity": 0}
+        totals[group_key]["quantity"] += qty or 0
+
+    return totals, (money_row[0] if money_row else 0.0)
+
+
+async def get_leaderboard_money():
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """
+            SELECT user_id, SUM(amount) as total
+            FROM payment_logs
+            WHERE kind = 'money'
+            GROUP BY user_id
+            HAVING total > 0
+            ORDER BY total DESC
+            """
+        )
+        rows = await cursor.fetchall()
+        return [{"user_id": r[0], "total": r[1]} for r in rows]
+
+
+async def get_leaderboard_brainrot_rows():
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT user_id, brainrot_key, other_name, quantity FROM payment_logs WHERE kind = 'brainrot'"
+        )
+        return await cursor.fetchall()
+
+
+async def clear_payment_money(user_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM payment_logs WHERE user_id = ? AND kind = 'money'", (user_id,))
+        await db.commit()
+
+
+async def adjust_payment_money(user_id: int, amount: float):
+    await log_payment_money(user_id, -amount, None)
+
+
+async def clear_payment_brainrot(user_id: int, brainrot_key: str = None):
+    async with aiosqlite.connect(DB_PATH) as db:
+        if brainrot_key:
+            await db.execute(
+                "DELETE FROM payment_logs WHERE user_id = ? AND kind = 'brainrot' AND brainrot_key = ?",
+                (user_id, brainrot_key),
+            )
+        else:
+            await db.execute("DELETE FROM payment_logs WHERE user_id = ? AND kind = 'brainrot'", (user_id,))
+        await db.commit()
+
+
+async def adjust_payment_brainrot(user_id: int, brainrot_key: str, quantity: int):
+    await log_payment_brainrot(user_id, brainrot_key, None, -quantity, None)
