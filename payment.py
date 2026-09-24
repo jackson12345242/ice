@@ -12,6 +12,11 @@ BRAINROT_CHOICES = [
     app_commands.Choice(name=info["label"], value=key) for key, info in PAYMENT_BRAINROTS.items()
 ]
 
+DIRECTION_CHOICES = [
+    app_commands.Choice(name="Brainrot Paid", value="paid"),
+    app_commands.Choice(name="Brainrot Received", value="received"),
+]
+
 REMOVE_TYPE_CHOICES = [
     app_commands.Choice(name="Brainrot Received", value="brainrot_received"),
     app_commands.Choice(name="Brainrot Paid", value="brainrot_paid"),
@@ -71,7 +76,6 @@ class Payment(commands.Cog):
         await channel.send(embed=embed)
 
     def _build_brainrot_section(self, totals: dict, heading: str, files: list, start_counter: int):
-        """Returns (embeds, next_counter) for one section."""
         embeds = []
         if not totals:
             return embeds, start_counter
@@ -97,23 +101,33 @@ class Payment(commands.Cog):
             line_num += 1
         return embeds, counter
 
-    async def _log_brainrot(
+    # ---------------- /payment log brainrot ----------------
+    @log_group.command(name="brainrot", description="Log a brainrot paid or received")
+    @app_commands.describe(
+        brainrot="Which brainrot",
+        type="Brainrot Paid or Brainrot Received",
+        quantity="How many (default 1)",
+        brainrot_name="Name of the brainrot if you picked Other",
+        proof="Optional proof screenshot",
+    )
+    @app_commands.choices(brainrot=BRAINROT_CHOICES, type=DIRECTION_CHOICES)
+    async def log_brainrot(
         self,
         interaction: discord.Interaction,
         brainrot: app_commands.Choice[str],
-        quantity: int,
-        brainrot_name: str,
-        proof: discord.Attachment,
-        direction: str,
+        type: app_commands.Choice[str],
+        quantity: int = 1,
+        brainrot_name: str = "",
+        proof: discord.Attachment = None,
     ):
         key, label = resolve_brainrot(brainrot.value, brainrot_name)
         image_url = proof.url if proof else None
 
         await db.log_payment_brainrot(
-            interaction.user.id, key, label if key == "other" else None, quantity, image_url, direction
+            interaction.user.id, key, label if key == "other" else None, quantity, image_url, type.value
         )
 
-        title = "🟢 Brainrot Received" if direction == "received" else "🔴 Brainrot Paid"
+        title = "🔴 Brainrot Paid" if type.value == "paid" else "🟢 Brainrot Received"
         embed = discord.Embed(title=title, color=EMBED_COLOR)
         embed.add_field(name="Logged by", value=interaction.user.mention, inline=False)
         embed.add_field(name="Brainrot", value=f"{quantity}x {label}", inline=True)
@@ -121,47 +135,8 @@ class Payment(commands.Cog):
             embed.set_image(url=image_url)
         embed.timestamp = discord.utils.utcnow()
 
-        verb = "received" if direction == "received" else "paid"
-        await interaction.response.send_message(f"Logged {quantity}x {label} {verb}.", ephemeral=True)
+        await interaction.response.send_message(f"Logged {quantity}x {label} ({type.name}).", ephemeral=True)
         await self._post_log(embed)
-
-    # ---------------- /payment log brainrot_paid ----------------
-    @log_group.command(name="brainrot_paid", description="Log brainrots you paid out")
-    @app_commands.describe(
-        brainrot="Which brainrot",
-        quantity="How many (default 1)",
-        brainrot_name="Name of the brainrot if you picked Other",
-        proof="Optional proof screenshot",
-    )
-    @app_commands.choices(brainrot=BRAINROT_CHOICES)
-    async def log_brainrot_paid(
-        self,
-        interaction: discord.Interaction,
-        brainrot: app_commands.Choice[str],
-        quantity: int = 1,
-        brainrot_name: str = "",
-        proof: discord.Attachment = None,
-    ):
-        await self._log_brainrot(interaction, brainrot, quantity, brainrot_name, proof, "paid")
-
-    # ---------------- /payment log brainrot_received ----------------
-    @log_group.command(name="brainrot_received", description="Log brainrots you received")
-    @app_commands.describe(
-        brainrot="Which brainrot",
-        quantity="How many (default 1)",
-        brainrot_name="Name of the brainrot if you picked Other",
-        proof="Optional proof screenshot",
-    )
-    @app_commands.choices(brainrot=BRAINROT_CHOICES)
-    async def log_brainrot_received(
-        self,
-        interaction: discord.Interaction,
-        brainrot: app_commands.Choice[str],
-        quantity: int = 1,
-        brainrot_name: str = "",
-        proof: discord.Attachment = None,
-    ):
-        await self._log_brainrot(interaction, brainrot, quantity, brainrot_name, proof, "received")
 
     # ---------------- /payment log money ----------------
     @log_group.command(name="money", description="Log a money payment")
