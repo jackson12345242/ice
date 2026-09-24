@@ -32,6 +32,19 @@ def resolve_brainrot(choice_value: str, brainrot_name: str = ""):
     return "other", name or "Other"
 
 
+def resolve_typed_brainrot(text: str):
+    """For a free-typed brainrot name: fuzzy-match against known brainrots, otherwise
+    treat it as a custom 'other' entry with that exact typed name."""
+    name = (text or "").strip()
+    if not name:
+        return "other", "Other"
+    match = difflib.get_close_matches(name, _KNOWN_LABELS.keys(), n=1, cutoff=0.6)
+    if match:
+        matched_key = _KNOWN_LABELS[match[0]]
+        return matched_key, PAYMENT_BRAINROTS[matched_key]["label"]
+    return "other", name
+
+
 class LeaderboardView(discord.ui.View):
     def __init__(self, money_embed: discord.Embed, brainrot_embed: discord.Embed):
         super().__init__(timeout=180)
@@ -94,23 +107,23 @@ class Payment(commands.Cog):
     @log_group.command(name="brainrot", description="Log a brainrot trade: what you paid and what you received")
     @app_commands.describe(
         payment_brainrot="The brainrot you paid/gave away",
-        recieved_brainrot="The brainrot you received in exchange",
+        recieved_brainrot="The brainrot you received in exchange (type it)",
         quantity="How many of each (default 1)",
-        brainrot_name="Name of the brainrot if either side was Other",
+        brainrot_name="Name of the brainrot if payment_brainrot was Other",
         proof="Optional proof screenshot",
     )
-    @app_commands.choices(payment_brainrot=BRAINROT_CHOICES, recieved_brainrot=BRAINROT_CHOICES)
+    @app_commands.choices(payment_brainrot=BRAINROT_CHOICES)
     async def log_brainrot(
         self,
         interaction: discord.Interaction,
         payment_brainrot: app_commands.Choice[str],
-        recieved_brainrot: app_commands.Choice[str],
+        recieved_brainrot: str,
         quantity: int = 1,
         brainrot_name: str = "",
         proof: discord.Attachment = None,
     ):
         paid_key, paid_label = resolve_brainrot(payment_brainrot.value, brainrot_name)
-        recv_key, recv_label = resolve_brainrot(recieved_brainrot.value, brainrot_name)
+        recv_key, recv_label = resolve_typed_brainrot(recieved_brainrot)
         image_url = proof.url if proof else None
 
         await db.log_payment_brainrot(
@@ -137,22 +150,19 @@ class Payment(commands.Cog):
     @log_group.command(name="money", description="Log money paid for a brainrot you received")
     @app_commands.describe(
         money_given="How much money you paid",
-        recieved_brainrot="The brainrot you received in exchange",
+        recieved_brainrot="The brainrot you received in exchange (type it)",
         quantity="How many (default 1)",
-        brainrot_name="Name of the brainrot if you picked Other",
         proof="Optional proof screenshot",
     )
-    @app_commands.choices(recieved_brainrot=BRAINROT_CHOICES)
     async def log_money(
         self,
         interaction: discord.Interaction,
         money_given: float,
-        recieved_brainrot: app_commands.Choice[str],
+        recieved_brainrot: str,
         quantity: int = 1,
-        brainrot_name: str = "",
         proof: discord.Attachment = None,
     ):
-        recv_key, recv_label = resolve_brainrot(recieved_brainrot.value, brainrot_name)
+        recv_key, recv_label = resolve_typed_brainrot(recieved_brainrot)
         image_url = proof.url if proof else None
 
         await db.log_payment_money(interaction.user.id, money_given, image_url)
