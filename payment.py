@@ -12,17 +12,6 @@ BRAINROT_CHOICES = [
     app_commands.Choice(name=info["label"], value=key) for key, info in PAYMENT_BRAINROTS.items()
 ]
 
-DIRECTION_CHOICES = [
-    app_commands.Choice(name="Brainrot Paid", value="paid"),
-    app_commands.Choice(name="Brainrot Received", value="received"),
-]
-
-REMOVE_TYPE_CHOICES = [
-    app_commands.Choice(name="Brainrot Received", value="brainrot_received"),
-    app_commands.Choice(name="Brainrot Paid", value="brainrot_paid"),
-    app_commands.Choice(name="Money", value="money"),
-]
-
 _KNOWN_LABELS = {
     info["label"]: key for key, info in PAYMENT_BRAINROTS.items() if key != "other"
 }
@@ -102,20 +91,20 @@ class Payment(commands.Cog):
         return embeds, counter
 
     # ---------------- /payment log brainrot ----------------
-    @log_group.command(name="brainrot", description="Log a brainrot paid or received")
+    @log_group.command(name="brainrot", description="Log a brainrot you received and what you paid for it")
     @app_commands.describe(
-        brainrot="Which brainrot",
-        type="Brainrot Paid or Brainrot Received",
+        brainrot="Which brainrot you received",
+        money="How much you paid for it",
         quantity="How many (default 1)",
         brainrot_name="Name of the brainrot if you picked Other",
         proof="Optional proof screenshot",
     )
-    @app_commands.choices(brainrot=BRAINROT_CHOICES, type=DIRECTION_CHOICES)
+    @app_commands.choices(brainrot=BRAINROT_CHOICES)
     async def log_brainrot(
         self,
         interaction: discord.Interaction,
         brainrot: app_commands.Choice[str],
-        type: app_commands.Choice[str],
+        money: float,
         quantity: int = 1,
         brainrot_name: str = "",
         proof: discord.Attachment = None,
@@ -124,18 +113,21 @@ class Payment(commands.Cog):
         image_url = proof.url if proof else None
 
         await db.log_payment_brainrot(
-            interaction.user.id, key, label if key == "other" else None, quantity, image_url, type.value
+            interaction.user.id, key, label if key == "other" else None, quantity, image_url, "received"
         )
+        await db.log_payment_money(interaction.user.id, money, image_url)
 
-        title = "🔴 Brainrot Paid" if type.value == "paid" else "🟢 Brainrot Received"
-        embed = discord.Embed(title=title, color=EMBED_COLOR)
+        embed = discord.Embed(title="🧠 Brainrot Payment Logged", color=EMBED_COLOR)
         embed.add_field(name="Logged by", value=interaction.user.mention, inline=False)
-        embed.add_field(name="Brainrot", value=f"{quantity}x {label}", inline=True)
+        embed.add_field(name="Received", value=f"{quantity}x {label}", inline=True)
+        embed.add_field(name="Paid", value=f"${money:,.2f}", inline=True)
         if image_url:
             embed.set_image(url=image_url)
         embed.timestamp = discord.utils.utcnow()
 
-        await interaction.response.send_message(f"Logged {quantity}x {label} ({type.name}).", ephemeral=True)
+        await interaction.response.send_message(
+            f"Logged {quantity}x {label} for ${money:,.2f}.", ephemeral=True
+        )
         await self._post_log(embed)
 
     # ---------------- /payment log money ----------------
@@ -165,9 +157,9 @@ class Payment(commands.Cog):
     @app_commands.describe(user="Whose payments to view (defaults to you)")
     async def payment_view(self, interaction: discord.Interaction, user: discord.User = None):
         target = user or interaction.user
-        _received, paid, money_total = await db.get_payment_summary(target.id)
+        received, _paid, money_total = await db.get_payment_summary(target.id)
 
-        if not paid and money_total <= 0:
+        if not received and money_total <= 0:
             await interaction.response.send_message(
                 f"{target.display_name} hasn't logged any payments yet.", ephemeral=True
             )
@@ -181,8 +173,8 @@ class Payment(commands.Cog):
 
         embeds = [summary]
         files = []
-        paid_embeds, _counter = self._build_brainrot_section(paid, "🔴 Paid", files, 0)
-        embeds.extend(paid_embeds)
+        received_embeds, _counter = self._build_brainrot_section(received, "🧠 Brainrots Received", files, 0)
+        embeds.extend(received_embeds)
 
         await interaction.response.send_message(embeds=embeds, files=files)
 
@@ -200,7 +192,7 @@ class Payment(commands.Cog):
         raw_rows = await db.get_leaderboard_brainrot_rows()
         per_user = {}
         for user_id, key, other_name, qty, direction in raw_rows:
-            if not qty or direction != "paid":
+            if not qty or direction != "received":
                 continue
             tier = PAYMENT_BRAINROTS.get(key, {}).get("tier", 0)
             entry = per_user.setdefault(user_id, {"score": 0, "counts": {}})
@@ -209,7 +201,7 @@ class Payment(commands.Cog):
             entry["counts"][label] = entry["counts"].get(label, 0) + qty
 
         ranked = sorted(per_user.items(), key=lambda kv: kv[1]["score"], reverse=True)
-        brainrot_embed = discord.Embed(title="🧠 Brainrot Leaderboard (paid)", color=EMBED_COLOR)
+        brainrot_embed = discord.Embed(title="🧠 Brainrot Leaderboard", color=EMBED_COLOR)
         lines = []
         for i, (user_id, data) in enumerate(ranked[:15]):
             positive = {label: c for label, c in data["counts"].items() if c > 0}
@@ -217,7 +209,7 @@ class Payment(commands.Cog):
                 continue
             counts_str = ", ".join(f"{c}x {label}" for label, c in positive.items())
             lines.append(f"{i + 1}. <@{user_id}> — {counts_str}")
-        brainrot_embed.description = "\n".join(lines) if lines else "No brainrots paid yet."
+        brainrot_embed.description = "\n".join(lines) if lines else "No brainrots logged yet."
 
         view = LeaderboardView(money_embed, brainrot_embed)
         await interaction.response.send_message(embed=money_embed, view=view)
@@ -226,11 +218,17 @@ class Payment(commands.Cog):
     @payment_group.command(name="remove", description="Remove a user's logged payments (admin only)")
     @app_commands.describe(
         user="Whose payments to adjust",
-        type="Brainrot Received, Brainrot Paid, or Money",
-        brainrot="Which brainrot to remove (Brainrot types only; leave blank to clear every type)",
+        type="Brainrot or Money",
+        brainrot="Which brainrot to remove (Brainrot type only; leave blank to clear every type)",
         amount="Specific amount/quantity to subtract (leave blank to clear everything in that category)",
     )
-    @app_commands.choices(type=REMOVE_TYPE_CHOICES, brainrot=BRAINROT_CHOICES)
+    @app_commands.choices(
+        type=[
+            app_commands.Choice(name="Brainrot", value="brainrot"),
+            app_commands.Choice(name="Money", value="money"),
+        ],
+        brainrot=BRAINROT_CHOICES,
+    )
     async def payment_remove(
         self,
         interaction: discord.Interaction,
@@ -253,16 +251,15 @@ class Payment(commands.Cog):
                 await db.adjust_payment_money(user.id, amount)
                 desc = f"removed ${amount:,.2f}"
         else:
-            direction = "received" if type.value == "brainrot_received" else "paid"
             if brainrot is None:
-                await db.clear_payment_brainrot(user.id, direction=direction)
-                desc = f"cleared all logged {type.name.lower()}"
+                await db.clear_payment_brainrot(user.id, direction="received")
+                desc = "cleared all logged brainrots"
             elif amount is None:
-                await db.clear_payment_brainrot(user.id, brainrot.value, direction=direction)
-                desc = f"cleared all logged {brainrot.name} ({type.name})"
+                await db.clear_payment_brainrot(user.id, brainrot.value, direction="received")
+                desc = f"cleared all logged {brainrot.name}"
             else:
-                await db.adjust_payment_brainrot(user.id, brainrot.value, int(amount), direction)
-                desc = f"removed {int(amount)}x {brainrot.name} ({type.name})"
+                await db.adjust_payment_brainrot(user.id, brainrot.value, int(amount), "received")
+                desc = f"removed {int(amount)}x {brainrot.name}"
 
         await interaction.response.send_message(f"Done — {desc} for {user.display_name}.", ephemeral=True)
 
