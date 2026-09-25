@@ -1,4 +1,5 @@
 import datetime
+import logging
 
 import aiohttp
 import discord
@@ -16,6 +17,8 @@ from config import (
     SPLIT_PAYMENT_WINDOW_MINUTES,
 )
 from wallet import WalletView
+
+log = logging.getLogger(__name__)
 
 
 async def get_ltc_usd_price() -> float:
@@ -44,10 +47,17 @@ async def find_ltc_payments(receiver_address: str, sender_address: str, min_usd:
     async with aiohttp.ClientSession() as session:
         async with session.get(url, params=params) as resp:
             if resp.status != 200:
+                body = await resp.text()
+                log.warning(
+                    "BlockCypher LTC lookup failed for %s: HTTP %s — %s",
+                    receiver_address, resp.status, body[:300],
+                )
                 return []
             data = await resp.json()
 
     matches = []
+    seen_from_sender = 0
+    near_misses = []
     for tx in data.get("txs", []):
         ts_raw = tx.get("confirmed") or tx.get("received")
         if not ts_raw:
@@ -65,12 +75,23 @@ async def find_ltc_payments(receiver_address: str, sender_address: str, min_usd:
         if sender_address not in input_addrs:
             continue
 
+        seen_from_sender += 1
         for out in tx.get("outputs", []):
             if receiver_address in (out.get("addresses") or []):
                 amount_ltc = out.get("value", 0) / 1e8
                 amount_usd = amount_ltc * price
                 if abs(amount_usd - min_usd) <= min_usd * tolerance:
                     matches.append((tx.get("hash"), amount_usd))
+                else:
+                    near_misses.append((tx.get("hash"), amount_usd))
+
+    if not matches:
+        log.info(
+            "LTC match miss: receiver=%s sender=%s expected=$%.2f tolerance=%.2f window=%sm "
+            "-> %s tx(s) in window from sender, near-misses(usd)=%s",
+            receiver_address, sender_address, min_usd, tolerance, SPLIT_PAYMENT_WINDOW_MINUTES,
+            seen_from_sender, near_misses,
+        )
     return matches
 
 
@@ -94,9 +115,23 @@ async def find_usdt_bep20_payments(receiver_address: str, sender_address: str, m
 
     async with aiohttp.ClientSession() as session:
         async with session.get(url, params=params) as resp:
+            if resp.status != 200:
+                body = await resp.text()
+                log.warning(
+                    "BscScan USDT lookup failed for %s: HTTP %s — %s",
+                    receiver_address, resp.status, body[:300],
+                )
+                return []
             data = await resp.json()
 
+    if data.get("status") == "0" and data.get("message") != "No transactions found":
+        # BscScan returns status "0" for errors too, e.g. rate limiting or a bad API key
+        log.warning("BscScan API error for %s: %s", receiver_address, data.get("result"))
+        return []
+
     matches = []
+    seen_from_sender = 0
+    near_misses = []
     for tx in data.get("result", []) or []:
         try:
             tx_ts = int(tx.get("timeStamp", "0"))
@@ -110,10 +145,21 @@ async def find_usdt_bep20_payments(receiver_address: str, sender_address: str, m
         if tx.get("to", "").lower() != receiver_address.lower():
             continue
 
+        seen_from_sender += 1
         decimals = int(tx.get("tokenDecimal", 18))
         amount_usdt = int(tx.get("value", "0")) / (10 ** decimals)
         if abs(amount_usdt - min_usd) <= min_usd * tolerance:
             matches.append((tx.get("hash"), amount_usdt))
+        else:
+            near_misses.append((tx.get("hash"), amount_usdt))
+
+    if not matches:
+        log.info(
+            "USDT match miss: receiver=%s sender=%s expected=$%.2f tolerance=%.2f window=%sm "
+            "-> %s tx(s) in window from sender, near-misses(usdt)=%s",
+            receiver_address, sender_address, min_usd, tolerance, SPLIT_PAYMENT_WINDOW_MINUTES,
+            seen_from_sender, near_misses,
+        )
     return matches
 
 
