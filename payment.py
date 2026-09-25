@@ -106,23 +106,20 @@ class Payment(commands.Cog):
     # ---------------- /payment log brainrot ----------------
     @log_group.command(name="brainrot", description="Log a brainrot trade: what you paid and what you received")
     @app_commands.describe(
-        payment_brainrot="The brainrot you paid/gave away",
-        recieved_brainrot="The brainrot you received in exchange (type it)",
+        payment_brainrot="Dragon Cannelloni or Garama/Madundung — if it's not one of those two, just type it",
+        recieved_brainrot="Dragon Cannelloni or Garama/Madundung — if it's not one of those two, just type it",
         quantity="How many of each (default 1)",
-        brainrot_name="Name of the brainrot if payment_brainrot was Other",
         proof="Optional proof screenshot",
     )
-    @app_commands.choices(payment_brainrot=BRAINROT_CHOICES)
     async def log_brainrot(
         self,
         interaction: discord.Interaction,
-        payment_brainrot: app_commands.Choice[str],
+        payment_brainrot: str,
         recieved_brainrot: str,
         quantity: int = 1,
-        brainrot_name: str = "",
         proof: discord.Attachment = None,
     ):
-        paid_key, paid_label = resolve_brainrot(payment_brainrot.value, brainrot_name)
+        paid_key, paid_label = resolve_typed_brainrot(payment_brainrot)
         recv_key, recv_label = resolve_typed_brainrot(recieved_brainrot)
         image_url = proof.url if proof else None
 
@@ -150,7 +147,7 @@ class Payment(commands.Cog):
     @log_group.command(name="money", description="Log money paid for a brainrot you received")
     @app_commands.describe(
         money_given="How much money you paid",
-        recieved_brainrot="The brainrot you received in exchange (type it)",
+        recieved_brainrot="Dragon Cannelloni or Garama/Madundung — if it's not one of those two, just type it",
         quantity="How many (default 1)",
         proof="Optional proof screenshot",
     )
@@ -188,9 +185,9 @@ class Payment(commands.Cog):
     @app_commands.describe(user="Whose payments to view (defaults to you)")
     async def payment_view(self, interaction: discord.Interaction, user: discord.User = None):
         target = user or interaction.user
-        received, paid, money_total = await db.get_payment_summary(target.id)
+        _received, paid, money_total = await db.get_payment_summary(target.id)
 
-        if not received and not paid and money_total <= 0:
+        if not paid and money_total <= 0:
             await interaction.response.send_message(
                 f"{target.display_name} hasn't logged any payments yet.", ephemeral=True
             )
@@ -204,10 +201,7 @@ class Payment(commands.Cog):
 
         embeds = [summary]
         files = []
-        counter = 0
-        received_embeds, counter = self._build_brainrot_section(received, "🟢 Received", files, counter)
-        embeds.extend(received_embeds)
-        paid_embeds, counter = self._build_brainrot_section(paid, "🔴 Paid", files, counter)
+        paid_embeds, _counter = self._build_brainrot_section(paid, "🔴 Paid", files, 0)
         embeds.extend(paid_embeds)
 
         await interaction.response.send_message(embeds=embeds, files=files)
@@ -226,7 +220,7 @@ class Payment(commands.Cog):
         raw_rows = await db.get_leaderboard_brainrot_rows()
         per_user = {}
         for user_id, key, other_name, qty, direction in raw_rows:
-            if not qty or direction != "received":
+            if not qty or direction != "paid":
                 continue
             tier = PAYMENT_BRAINROTS.get(key, {}).get("tier", 0)
             entry = per_user.setdefault(user_id, {"score": 0, "counts": {}})
@@ -235,7 +229,7 @@ class Payment(commands.Cog):
             entry["counts"][label] = entry["counts"].get(label, 0) + qty
 
         ranked = sorted(per_user.items(), key=lambda kv: kv[1]["score"], reverse=True)
-        brainrot_embed = discord.Embed(title="🧠 Brainrot Leaderboard (received)", color=EMBED_COLOR)
+        brainrot_embed = discord.Embed(title="🧠 Brainrot Leaderboard (paid)", color=EMBED_COLOR)
         lines = []
         for i, (user_id, data) in enumerate(ranked[:15]):
             positive = {label: c for label, c in data["counts"].items() if c > 0}
