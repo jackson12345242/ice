@@ -11,13 +11,17 @@ from config import (
     EMBED_COLOR,
     SPLIT_TEAM_SIZE,
     BLOCKCYPHER_TOKEN,
-    BSCSCAN_API_KEY,
+    ETHERSCAN_API_KEY,
     USDT_BEP20_CONTRACT,
     SPLIT_PAYMENT_TOLERANCE,
     SPLIT_PAYMENT_WINDOW_MINUTES,
 )
 from wallet import WalletView
 from coins import normalize_coin
+
+# BSC's chain ID on the unified Etherscan API V2 (api.etherscan.io/v2/api?chainid=...).
+# BSCScan's standalone API (api.bscscan.com) is deprecated and no longer returns JSON.
+BSC_CHAIN_ID = 56
 
 log = logging.getLogger(__name__)
 
@@ -103,31 +107,42 @@ async def find_usdt_bep20_payments(receiver_address: str, sender_address: str, m
         (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=SPLIT_PAYMENT_WINDOW_MINUTES)).timestamp()
     )
 
-    url = "https://api.bscscan.com/api"
+    # BscScan's own API (api.bscscan.com) is deprecated and no longer serves JSON — BNB Chain
+    # data now lives behind the unified Etherscan API V2, selected via chainid.
+    url = "https://api.etherscan.io/v2/api"
     params = {
+        "chainid": BSC_CHAIN_ID,
         "module": "account",
         "action": "tokentx",
         "contractaddress": USDT_BEP20_CONTRACT,
         "address": receiver_address,
         "sort": "desc",
     }
-    if BSCSCAN_API_KEY:
-        params["apikey"] = BSCSCAN_API_KEY
+    if ETHERSCAN_API_KEY:
+        params["apikey"] = ETHERSCAN_API_KEY
 
     async with aiohttp.ClientSession() as session:
         async with session.get(url, params=params) as resp:
-            if resp.status != 200:
+            try:
+                data = await resp.json(content_type=None)
+            except (aiohttp.ContentTypeError, ValueError) as e:
                 body = await resp.text()
                 log.warning(
-                    "BscScan USDT lookup failed for %s: HTTP %s — %s",
-                    receiver_address, resp.status, body[:300],
+                    "Etherscan V2 USDT lookup returned unparseable response for %s: HTTP %s (%s) — %s",
+                    receiver_address, resp.status, e, body[:300],
                 )
                 return []
-            data = await resp.json()
+            if resp.status != 200:
+                log.warning(
+                    "Etherscan V2 USDT lookup failed for %s: HTTP %s — %s",
+                    receiver_address, resp.status, str(data)[:300],
+                )
+                return []
 
     if data.get("status") == "0" and data.get("message") != "No transactions found":
-        # BscScan returns status "0" for errors too, e.g. rate limiting or a bad API key
-        log.warning("BscScan API error for %s: %s", receiver_address, data.get("result"))
+        # Etherscan returns status "0" for errors too, e.g. rate limiting, a bad/missing API
+        # key, or a plan that doesn't cover BNB Chain (chainid=56) on Etherscan API V2.
+        log.warning("Etherscan V2 API error for %s: %s", receiver_address, data.get("result"))
         return []
 
     matches = []
@@ -294,9 +309,17 @@ class Split(commands.Cog):
                 if pw_coin != cw_coin:
                     continue
                 if pw_coin == "LTC":
-                    candidates = await find_ltc_payments(cw["address"], pw["address"], per_person, SPLIT_PAYMENT_TOLERANCE)
+                    try:
+                        candidates = await find_ltc_payments(cw["address"], pw["address"], per_person, SPLIT_PAYMENT_TOLERANCE)
+                    except Exception:
+                        log.exception("LTC payment lookup crashed for receiver=%s sender=%s", cw["address"], pw["address"])
+                        candidates = []
                 elif pw_coin == "USDT":
-                    candidates = await find_usdt_bep20_payments(cw["address"], pw["address"], per_person, SPLIT_PAYMENT_TOLERANCE)
+                    try:
+                        candidates = await find_usdt_bep20_payments(cw["address"], pw["address"], per_person, SPLIT_PAYMENT_TOLERANCE)
+                    except Exception:
+                        log.exception("USDT payment lookup crashed for receiver=%s sender=%s", cw["address"], pw["address"])
+                        candidates = []
                 else:
                     candidates = []
 
