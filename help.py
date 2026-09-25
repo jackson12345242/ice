@@ -253,7 +253,7 @@ class Help(commands.Cog):
     @app_commands.command(name="help", description="See every command and how to use it")
     async def help_command(self, interaction: discord.Interaction):
         await interaction.response.send_message(
-            embed=build_overview_embed(), view=HelpView(), ephemeral=True
+            embed=build_overview_embed(), view=HelpView()
         )
 
 
