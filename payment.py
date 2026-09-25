@@ -108,7 +108,7 @@ class Payment(commands.Cog):
     @app_commands.describe(
         payment_brainrot="The brainrot you paid/gave away",
         recieved_brainrot="Dragon Cannelloni or Garama/Madundung — if it's not one of those two, just type it",
-        quantity="How many of each (default 1)",
+        quantity="How many of the PAID brainrot you gave (default 1). Received is always logged as 1x.",
         proof="Optional proof screenshot",
     )
     @app_commands.choices(payment_brainrot=BRAINROT_CHOICES)
@@ -124,23 +124,24 @@ class Payment(commands.Cog):
         recv_key, recv_label = resolve_typed_brainrot(recieved_brainrot)
         image_url = proof.url if proof else None
 
+        # quantity only scales the paid brainrot — the received brainrot is always 1x
         await db.log_payment_brainrot(
             interaction.user.id, paid_key, paid_label if paid_key == "other" else None, quantity, image_url, "paid"
         )
         await db.log_payment_brainrot(
-            interaction.user.id, recv_key, recv_label if recv_key == "other" else None, quantity, image_url, "received"
+            interaction.user.id, recv_key, recv_label if recv_key == "other" else None, 1, image_url, "received"
         )
 
         embed = discord.Embed(title="🔄 Brainrot Trade Logged", color=EMBED_COLOR)
         embed.add_field(name="Logged by", value=interaction.user.mention, inline=False)
         embed.add_field(name="Paid", value=f"{quantity}x {paid_label}", inline=True)
-        embed.add_field(name="Received", value=f"{quantity}x {recv_label}", inline=True)
+        embed.add_field(name="Received", value=f"1x {recv_label}", inline=True)
         if image_url:
             embed.set_image(url=image_url)
         embed.timestamp = discord.utils.utcnow()
 
         await interaction.response.send_message(
-            f"Logged {quantity}x {paid_label} paid for {quantity}x {recv_label}.", ephemeral=True
+            f"Logged {quantity}x {paid_label} paid for 1x {recv_label}.", ephemeral=True
         )
         await self._post_log(embed)
 
