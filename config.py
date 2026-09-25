@@ -34,7 +34,7 @@ SPLIT_PAYMENT_WINDOW_MINUTES = 15  # only count transactions within this many mi
 
 # --- Blockchain lookups ---
 BLOCKCYPHER_TOKEN = os.getenv("BLOCKCYPHER_TOKEN", "")
-BSCSCAN_API_KEY = os.getenv("BSCSCAN_API_KEY", "")  # optional — public endpoint works fine without one
+ETHERSCAN_API_KEY = os.getenv("ETHERSCAN_API_KEY")
 USDT_BEP20_CONTRACT = "0x55d398326f99059fF775485246999027B3197955"
 
 # --- Payment tracking ---
