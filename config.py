@@ -45,5 +45,4 @@ PAYMENT_ADMIN_USER_ID = FUND_ADMIN_USER_ID  # only this user can use /payment re
 PAYMENT_BRAINROTS = {
     "dragon_cannelloni": {"label": "Dragon Cannelloni", "asset": "assets/dragon_cannelloni.png", "tier": 2},
     "garama_madundung": {"label": "Garama / Madundung", "asset": "assets/garama.png", "tier": 1},
-    "other": {"label": "Other", "asset": None, "tier": 0},
 }
