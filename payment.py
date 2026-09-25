@@ -106,20 +106,21 @@ class Payment(commands.Cog):
     # ---------------- /payment log brainrot ----------------
     @log_group.command(name="brainrot", description="Log a brainrot trade: what you paid and what you received")
     @app_commands.describe(
-        payment_brainrot="Dragon Cannelloni or Garama/Madundung — if it's not one of those two, just type it",
+        payment_brainrot="The brainrot you paid/gave away",
         recieved_brainrot="Dragon Cannelloni or Garama/Madundung — if it's not one of those two, just type it",
         quantity="How many of each (default 1)",
         proof="Optional proof screenshot",
     )
+    @app_commands.choices(payment_brainrot=BRAINROT_CHOICES)
     async def log_brainrot(
         self,
         interaction: discord.Interaction,
-        payment_brainrot: str,
+        payment_brainrot: app_commands.Choice[str],
         recieved_brainrot: str,
         quantity: int = 1,
         proof: discord.Attachment = None,
     ):
-        paid_key, paid_label = resolve_typed_brainrot(payment_brainrot)
+        paid_key, paid_label = resolve_brainrot(payment_brainrot.value)
         recv_key, recv_label = resolve_typed_brainrot(recieved_brainrot)
         image_url = proof.url if proof else None
 
