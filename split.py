@@ -157,7 +157,7 @@ async def find_usdt_bep20_payments(receiver_address: str, sender_address: str, m
             [{
                 "category": ["20"],
                 "fromBlock": hex(from_block),
-                "toBlock": "latest",
+                "toBlock": hex(latest_block),
                 "contractAddresses": [USDT_BEP20_CONTRACT],
                 "fromAddress": sender_address,
                 "toAddress": receiver_address,
