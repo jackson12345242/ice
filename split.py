@@ -190,9 +190,16 @@ async def find_usdt_bep20_payments(receiver_address: str, sender_address: str, m
             raw_value = int(tr.get("value", "0x0"), 16)
         except (TypeError, ValueError):
             continue
-        decimal_hex = tr.get("decimal")
+        decimal_raw = tr.get("decimal")
         try:
-            decimals = int(decimal_hex, 16) if decimal_hex else 18
+            if not decimal_raw:
+                decimals = 18
+            elif str(decimal_raw).lower().startswith("0x"):
+                decimals = int(decimal_raw, 16)
+            else:
+                # MegaNode/BSCTrace actually returns this as a plain decimal string
+                # (e.g. "18"), despite docs describing it as hex-encoded.
+                decimals = int(decimal_raw)
         except (TypeError, ValueError):
             decimals = 18
         amount_usdt = raw_value / (10 ** decimals)
