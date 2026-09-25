@@ -34,7 +34,10 @@ SPLIT_PAYMENT_WINDOW_MINUTES = 15  # only count transactions within this many mi
 
 # --- Blockchain lookups ---
 BLOCKCYPHER_TOKEN = os.getenv("BLOCKCYPHER_TOKEN", "")
-ETHERSCAN_API_KEY = os.getenv("ETHERSCAN_API_KEY")
+# BscScan's API is deprecated and Etherscan V2 has no free tier for BNB Chain, so BEP20
+# lookups go through BSCTrace via MegaNode instead (JSON-RPC 2.0, free tier available).
+# Get a key from the MegaNode dashboard: https://nodereal.io/meganode
+MEGANODE_API_KEY = os.getenv("MEGANODE_API_KEY", "")
 USDT_BEP20_CONTRACT = "0x55d398326f99059fF775485246999027B3197955"
 
 # --- Payment tracking ---
