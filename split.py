@@ -11,7 +11,7 @@ from config import (
     EMBED_COLOR,
     SPLIT_TEAM_SIZE,
     BLOCKCYPHER_TOKEN,
-    ETHERSCAN_API_KEY,
+    MEGANODE_API_KEY,
     USDT_BEP20_CONTRACT,
     SPLIT_PAYMENT_TOLERANCE,
     SPLIT_PAYMENT_WINDOW_MINUTES,
@@ -19,9 +19,15 @@ from config import (
 from wallet import WalletView
 from coins import normalize_coin
 
-# BSC's chain ID on the unified Etherscan API V2 (api.etherscan.io/v2/api?chainid=...).
-# BSCScan's standalone API (api.bscscan.com) is deprecated and no longer returns JSON.
-BSC_CHAIN_ID = 56
+# BSCTrace (via MegaNode) is the current recommended replacement for the deprecated
+# BscScan API and for Etherscan V2 (which has no free tier for BNB Chain). It's a
+# standard JSON-RPC 2.0 endpoint rather than a REST/module-action API.
+MEGANODE_BSC_URL = f"https://bsc-mainnet.nodereal.io/v1/{MEGANODE_API_KEY}"
+
+# How far back (in blocks) to look when scanning for the payment window, as a safety
+# margin around SPLIT_PAYMENT_WINDOW_MINUTES. BSC blocks land roughly every ~1-3s, so
+# 10,000 blocks comfortably covers windows well beyond 15 minutes with room to spare.
+MEGANODE_BLOCK_LOOKBACK = 10_000
 
 log = logging.getLogger(__name__)
 
@@ -100,74 +106,101 @@ async def find_ltc_payments(receiver_address: str, sender_address: str, min_usd:
     return matches
 
 
+async def _meganode_rpc(session: aiohttp.ClientSession, method: str, params: list):
+    """Call a JSON-RPC 2.0 method against the BSCTrace/MegaNode endpoint. Returns the
+    parsed `result` on success, or None (with a warning logged) on any failure."""
+    payload = {"jsonrpc": "2.0", "method": method, "params": params, "id": 1}
+    async with session.post(MEGANODE_BSC_URL, json=payload) as resp:
+        try:
+            data = await resp.json(content_type=None)
+        except (aiohttp.ContentTypeError, ValueError) as e:
+            body = await resp.text()
+            log.warning(
+                "MegaNode %s returned unparseable response: HTTP %s (%s) — %s",
+                method, resp.status, e, body[:300],
+            )
+            return None
+        if resp.status != 200:
+            log.warning("MegaNode %s failed: HTTP %s — %s", method, resp.status, str(data)[:300])
+            return None
+        if "error" in data:
+            log.warning("MegaNode %s API error: %s", method, data["error"])
+            return None
+        return data.get("result")
+
+
 async def find_usdt_bep20_payments(receiver_address: str, sender_address: str, min_usd: float, tolerance: float):
     """Return every RECENT incoming USDT (BEP20) transfer to receiver_address from sender_address
-    that lands within the tolerance band of min_usd, most recent first: [(tx_id, amount_usd), ...]."""
+    that lands within the tolerance band of min_usd, most recent first: [(tx_id, amount_usd), ...].
+
+    Uses BSCTrace via MegaNode's nr_getAssetTransfers (JSON-RPC), the recommended
+    replacement for the deprecated BscScan API / paid-only Etherscan V2 BNB Chain access.
+    """
     cutoff_ts = int(
         (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=SPLIT_PAYMENT_WINDOW_MINUTES)).timestamp()
     )
 
-    # BscScan's own API (api.bscscan.com) is deprecated and no longer serves JSON — BNB Chain
-    # data now lives behind the unified Etherscan API V2, selected via chainid.
-    url = "https://api.etherscan.io/v2/api"
-    params = {
-        "chainid": BSC_CHAIN_ID,
-        "module": "account",
-        "action": "tokentx",
-        "contractaddress": USDT_BEP20_CONTRACT,
-        "address": receiver_address,
-        "sort": "desc",
-    }
-    if ETHERSCAN_API_KEY:
-        params["apikey"] = ETHERSCAN_API_KEY
-
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, params=params) as resp:
-            try:
-                data = await resp.json(content_type=None)
-            except (aiohttp.ContentTypeError, ValueError) as e:
-                body = await resp.text()
-                log.warning(
-                    "Etherscan V2 USDT lookup returned unparseable response for %s: HTTP %s (%s) — %s",
-                    receiver_address, resp.status, e, body[:300],
-                )
-                return []
-            if resp.status != 200:
-                log.warning(
-                    "Etherscan V2 USDT lookup failed for %s: HTTP %s — %s",
-                    receiver_address, resp.status, str(data)[:300],
-                )
-                return []
+        latest_hex = await _meganode_rpc(session, "eth_blockNumber", [])
+        if latest_hex is None:
+            return []
+        try:
+            latest_block = int(latest_hex, 16)
+        except (TypeError, ValueError):
+            log.warning("MegaNode eth_blockNumber returned unexpected value: %r", latest_hex)
+            return []
+        from_block = max(latest_block - MEGANODE_BLOCK_LOOKBACK, 0)
 
-    if data.get("status") == "0" and data.get("message") != "No transactions found":
-        # Etherscan returns status "0" for errors too, e.g. rate limiting, a bad/missing API
-        # key, or a plan that doesn't cover BNB Chain (chainid=56) on Etherscan API V2.
-        log.warning("Etherscan V2 API error for %s: %s", receiver_address, data.get("result"))
+        result = await _meganode_rpc(
+            session,
+            "nr_getAssetTransfers",
+            [{
+                "category": ["20"],
+                "fromBlock": hex(from_block),
+                "toBlock": "latest",
+                "contractAddresses": [USDT_BEP20_CONTRACT],
+                "fromAddress": sender_address,
+                "toAddress": receiver_address,
+                "order": "desc",
+                "maxCount": "0x3e8",  # 1000, the max nr_getAssetTransfers allows
+            }],
+        )
+
+    if result is None:
         return []
 
     matches = []
     seen_from_sender = 0
     near_misses = []
-    for tx in data.get("result", []) or []:
+    for tr in result.get("transfers", []) or []:
         try:
-            tx_ts = int(tx.get("timeStamp", "0"))
-        except ValueError:
+            tx_ts = int(tr.get("blockTimeStamp", 0))
+        except (TypeError, ValueError):
             continue
         if tx_ts < cutoff_ts:
             continue
 
-        if tx.get("from", "").lower() != sender_address.lower():
+        if (tr.get("from") or "").lower() != sender_address.lower():
             continue
-        if tx.get("to", "").lower() != receiver_address.lower():
+        if (tr.get("to") or "").lower() != receiver_address.lower():
             continue
 
         seen_from_sender += 1
-        decimals = int(tx.get("tokenDecimal", 18))
-        amount_usdt = int(tx.get("value", "0")) / (10 ** decimals)
+        try:
+            raw_value = int(tr.get("value", "0x0"), 16)
+        except (TypeError, ValueError):
+            continue
+        decimal_hex = tr.get("decimal")
+        try:
+            decimals = int(decimal_hex, 16) if decimal_hex else 18
+        except (TypeError, ValueError):
+            decimals = 18
+        amount_usdt = raw_value / (10 ** decimals)
+
         if abs(amount_usdt - min_usd) <= min_usd * tolerance:
-            matches.append((tx.get("hash"), amount_usdt))
+            matches.append((tr.get("hash"), amount_usdt))
         else:
-            near_misses.append((tx.get("hash"), amount_usdt))
+            near_misses.append((tr.get("hash"), amount_usdt))
 
     if not matches:
         log.info(
