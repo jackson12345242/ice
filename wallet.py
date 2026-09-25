@@ -3,6 +3,7 @@ from discord import app_commands
 from discord.ext import commands
 
 import database as db
+from coins import normalize_coin
 
 
 class AddressButton(discord.ui.Button):
@@ -52,13 +53,17 @@ class Wallet(commands.Cog):
         address: str,
         network: str = "",
     ):
+        # Normalize so "Litecoin"/"LTC"/"litecoin" etc. are always saved as the same canonical
+        # coin — this is what split-payment matching relies on to compare wallets correctly.
+        coin = normalize_coin(coin)
+
         await db.add_wallet(interaction.user.id, coin, address, network)
         wallets = await db.get_wallets(interaction.user.id)
 
         embed = build_wallet_embed(interaction.user)
         embed.add_field(
             name="Saved",
-            value=f"**{coin.upper()}{' — ' + network.upper() if network else ''}** address saved.",
+            value=f"**{coin}{' — ' + network.upper() if network else ''}** address saved.",
             inline=False,
         )
         view = WalletView(wallets)
