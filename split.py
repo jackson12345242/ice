@@ -17,6 +17,7 @@ from config import (
     SPLIT_PAYMENT_WINDOW_MINUTES,
 )
 from wallet import WalletView
+from coins import normalize_coin
 
 log = logging.getLogger(__name__)
 
@@ -287,12 +288,14 @@ class Split(commands.Cog):
         used_coin = None
 
         for pw in payer_wallets:
+            pw_coin = normalize_coin(pw["coin"])
             for cw in creator_wallets:
-                if pw["coin"] != cw["coin"]:
+                cw_coin = normalize_coin(cw["coin"])
+                if pw_coin != cw_coin:
                     continue
-                if pw["coin"] == "LTC":
+                if pw_coin == "LTC":
                     candidates = await find_ltc_payments(cw["address"], pw["address"], per_person, SPLIT_PAYMENT_TOLERANCE)
-                elif pw["coin"] == "USDT":
+                elif pw_coin == "USDT":
                     candidates = await find_usdt_bep20_payments(cw["address"], pw["address"], per_person, SPLIT_PAYMENT_TOLERANCE)
                 else:
                     candidates = []
@@ -301,7 +304,7 @@ class Split(commands.Cog):
                     if await db.is_tx_used(tx_id):
                         continue  # this exact transaction already credited someone else — skip it
                     result = (tx_id, amount_usd)
-                    used_coin = pw["coin"]
+                    used_coin = pw_coin
                     break
                 if result:
                     break
@@ -309,6 +312,13 @@ class Split(commands.Cog):
                 break
 
         if not result:
+            payer_coins = {normalize_coin(w["coin"]) for w in payer_wallets}
+            creator_coins = {normalize_coin(w["coin"]) for w in creator_wallets}
+            if not (payer_coins & creator_coins):
+                log.info(
+                    "Split coin mismatch: %s's wallets normalize to %s, %s's wallets normalize to %s — no overlap",
+                    user.display_name, payer_coins, self.bot.get_user(split["creator_id"]) or split["creator_id"], creator_coins,
+                )
             await interaction.edit_original_response(
                 content=(
                     f"Couldn't find a matching, unused payment of about ${per_person:,.2f} "
