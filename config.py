@@ -38,7 +38,7 @@ BSCSCAN_API_KEY = os.getenv("BSCSCAN_API_KEY", "")  # optional — public endpoi
 USDT_BEP20_CONTRACT = "0x55d398326f99059fF775485246999027B3197955"
 
 # --- Payment tracking ---
-PAYMENT_LOG_CHANNEL_ID = 155211188756965798  # every /payment log goes here
+PAYMENT_LOG_CHANNEL_ID = 1552111887569657987  # every /payment log goes here
 PAYMENT_ADMIN_USER_ID = FUND_ADMIN_USER_ID  # only this user can use /payment remove
 
 # tier = relative quality, used to weight the brainrot leaderboard (higher = better)
