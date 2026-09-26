@@ -235,14 +235,16 @@ class Watchlist(commands.Cog):
     def _alert_channel(self):
         return self.bot.get_channel(ALERT_CHANNEL_ID)
 
-    async def check_all(self, *, manual: bool = False) -> int:
-        """Checks every tracked link. Returns how many prices changed."""
+    async def check_all(self, *, manual: bool = False) -> dict:
+        """Checks every tracked link. Returns counts: checked, changed, failed."""
         items = await db_all()
         changed = 0
+        failed = 0
         for item in items:
             try:
                 price, _name = await fetch_listing(self.session, item["url"])
             except FetchError:
+                failed += 1
                 continue
 
             if price != item["last_price"]:
@@ -250,7 +252,7 @@ class Watchlist(commands.Cog):
                 changed += 1
                 await self._send_alert(item, price)
 
-        return changed
+        return {"checked": len(items), "changed": changed, "failed": failed}
 
     async def _send_alert(self, item: dict, new_price: float):
         channel = self._alert_channel()
@@ -336,11 +338,16 @@ class Watchlist(commands.Cog):
     @app_commands.command(name="instaeldopoll", description="Immediately re-check all watchlist prices")
     async def instaeldopoll(self, interaction: discord.Interaction):
         await interaction.response.defer(thinking=True)
-        changed = await self.check_all(manual=True)
-        if changed:
-            await interaction.followup.send(f"Poll complete — {changed} item(s) changed price. Check the alerts channel.")
-        else:
-            await interaction.followup.send("Poll complete — no price changes.")
+        result = await self.check_all(manual=True)
+
+        if result["checked"] == 0:
+            await interaction.followup.send("Nothing is being tracked yet — add a link with `/watchlist add` first.")
+            return
+
+        msg = f"Checked {result['checked']} item(s) — {result['changed']} changed."
+        if result["failed"]:
+            msg += f" ({result['failed']} couldn't be fetched — check the link(s) are still valid.)"
+        await interaction.followup.send(msg)
 
 
 async def setup(bot: commands.Bot):
