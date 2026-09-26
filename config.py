@@ -10,6 +10,7 @@ BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "")
 # --- Fixed IDs from your spec ---
 FUND_LOG_CHANNEL_ID = 1548407028118986923   # every /fund add and /remove fund gets logged here
 FUND_ADMIN_USER_ID = 645395932812279844      # only this user can use /remove fund
+WATCHLIST_ALERT_CHANNEL_ID = 1553456408911937597  # eldorado price-change alerts go here
 
 # --- Brainrot catalog ---
 # key = value used internally / in the DB, label = shown in the dropdown, asset = icon file in /assets
