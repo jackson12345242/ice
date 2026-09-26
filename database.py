@@ -129,6 +129,20 @@ async def get_wallets(user_id: int):
         return [{"coin": r[0], "network": r[1], "address": r[2]} for r in rows]
 
 
+async def remove_wallet(user_id: int, coin: str, network: str = "") -> int:
+    """Deletes the wallet matching this exact (user_id, coin, network) — the same composite
+    key add_wallet upserts on. coin/network should be passed exactly as returned by
+    get_wallets (already upper-cased), not re-normalized, so the match is exact.
+    Returns the number of rows deleted (0 or 1, since that key is unique)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "DELETE FROM wallets WHERE user_id = ? AND coin = ? AND network = ?",
+            (user_id, coin, network or ""),
+        )
+        await db.commit()
+        return cursor.rowcount
+
+
 # ---------- Fund: brainrots ----------
 
 async def add_brainrot(key: str, amount: int):
