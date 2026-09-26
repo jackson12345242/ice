@@ -39,6 +39,7 @@ link stops working, run debug_fetch.py's API mode (or re-check the Network tab)
 to confirm the endpoint still returns the same JSON shape.
 """
 
+import os
 import re
 import json
 import sqlite3
@@ -59,7 +60,12 @@ from config import WATCHLIST_ALERT_CHANNEL_ID
 
 ALERT_CHANNEL_ID = WATCHLIST_ALERT_CHANNEL_ID
 CHECK_INTERVAL_MINUTES = 10
-DB_PATH = Path(__file__).parent / "watchlist.db"
+
+# Railway injects RAILWAY_VOLUME_MOUNT_PATH when a volume is attached to this
+# service (yours is mounted at /data) — write the DB there so it survives
+# redeploys. Falls back to sitting next to this file for local/non-Railway runs.
+DATA_DIR = Path(os.getenv("RAILWAY_VOLUME_MOUNT_PATH", str(Path(__file__).parent)))
+DB_PATH = DATA_DIR / "watchlist.db"
 
 HEADERS = {
     "User-Agent": (
