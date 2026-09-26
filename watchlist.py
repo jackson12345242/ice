@@ -53,11 +53,13 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
+from config import WATCHLIST_ALERT_CHANNEL_ID
+
 # ----------------------------------------------------------------------------
 # Config
 # ----------------------------------------------------------------------------
 
-ALERT_CHANNEL_ID = 1553456408911937597
+ALERT_CHANNEL_ID = WATCHLIST_ALERT_CHANNEL_ID
 CHECK_INTERVAL_MINUTES = 10
 DB_PATH = Path(__file__).parent / "watchlist.db"
 
