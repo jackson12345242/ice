@@ -90,6 +90,53 @@ class Wallet(commands.Cog):
         view = WalletView(wallets)
         await interaction.response.send_message(embed=embed, view=view)
 
+    @wallet_group.command(name="remove", description="Remove one of your saved payment addresses")
+    @app_commands.describe(
+        coin="Which coin's address to remove, e.g. USDT, LTC",
+        network="Optional — only needed if you have more than one saved address for that coin",
+    )
+    async def wallet_remove(
+        self,
+        interaction: discord.Interaction,
+        coin: str,
+        network: str = "",
+    ):
+        target_coin = normalize_coin(coin)
+        wallets = await db.get_wallets(interaction.user.id)
+        matches = [w for w in wallets if normalize_coin(w["coin"]) == target_coin]
+
+        if network:
+            narrowed = [w for w in matches if (w["network"] or "").strip().lower() == network.strip().lower()]
+            if narrowed:
+                matches = narrowed
+
+        if not matches:
+            await interaction.response.send_message(
+                f"You don't have a saved **{target_coin}** address to remove.", ephemeral=True
+            )
+            return
+
+        if len(matches) > 1:
+            lines = "\n".join(f"• {w['coin']} — {w['network'] or 'no network set'}" for w in matches)
+            await interaction.response.send_message(
+                f"You have more than one **{target_coin}** address saved — pass `network` to pick which one:\n{lines}",
+                ephemeral=True,
+            )
+            return
+
+        removed = matches[0]
+        await db.remove_wallet(interaction.user.id, removed["coin"], removed["network"])
+
+        wallets = await db.get_wallets(interaction.user.id)
+        embed = build_wallet_embed(interaction.user)
+        embed.add_field(
+            name="Removed",
+            value=f"**{removed['coin']}{' — ' + removed['network'].upper() if removed['network'] else ''}** address removed.",
+            inline=False,
+        )
+        view = WalletView(wallets) if wallets else None
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Wallet(bot))
