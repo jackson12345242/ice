@@ -16,8 +16,6 @@ INTEGRATION
 1. Drop this file next to bot.py, config.py, database.py, etc.
 2. Add to requirements.txt:
        aiohttp
-       beautifulsoup4
-       lxml
 3. Load it as an extension in bot.py, e.g. inside your setup_hook / on_ready
    (wherever you currently call bot.load_extension(...) for your other cogs):
        await bot.load_extension("watchlist")
@@ -29,16 +27,16 @@ next to this file) so it does NOT touch your existing database.py. If you'd rath
 it use your existing DB layer, show me database.py and I'll wire it in instead.
 
 --------------------------------------------------------------------------------
-IMPORTANT CAVEAT — PLEASE READ
+HOW PRICES ARE FETCHED
 --------------------------------------------------------------------------------
-I built the page-scraping logic from what Eldorado's search/category pages expose
-publicly, but I could not load one of your individual "/oi/<id>" offer links from
-here to confirm their exact HTML structure. To handle that, price/title extraction
-below tries three strategies in order (embedded Nuxt JSON state -> OpenGraph/meta
-price tags -> a plain "$X.XX" regex scan of the page). This should be resilient to
-most layouts, but if Eldorado changes their page or the selectors don't match,
-`fetch_listing()` is the one function you'll need to tweak — run /instaeldopoll
-after adding your first link to confirm it actually pulled a sane price and name.
+Eldorado's listing pages render client-side (no price in the raw HTML), so instead
+of scraping the page this calls the same internal API their frontend uses:
+    https://www.eldorado.gg/api/v1/item-management/offers/{offer_id}?includeProduct=true
+found via the browser's Network tab. This is faster and far more reliable than
+HTML scraping would have been, but it's an undocumented private endpoint, so
+Eldorado could change its shape or add auth requirements without notice. If a
+link stops working, run debug_fetch.py's API mode (or re-check the Network tab)
+to confirm the endpoint still returns the same JSON shape.
 """
 
 import re
@@ -70,8 +68,6 @@ HEADERS = {
     ),
     "Accept-Language": "en-US,en;q=0.9",
 }
-
-PRICE_RE = re.compile(r"\$\s?([\d,]+(?:\.\d{1,2})?)")
 
 
 # ----------------------------------------------------------------------------
@@ -160,92 +156,53 @@ async def db_exists(url: str) -> bool:
 
 
 # ----------------------------------------------------------------------------
-# Scraping
+# Fetching — Eldorado's own internal API, found via DevTools Network tab.
+#
+# A page like:
+#   https://www.eldorado.gg/steal-a-brainrot-brainrots/oi/54fa8a06-4fe8-4e93-a907-08de80cf1bcf
+# loads its data client-side from:
+#   https://www.eldorado.gg/api/v1/item-management/offers/{offer_id}?includeProduct=true
+# which returns clean JSON: offer.pricePerUnitInUSD.amount and offer.offerTitle.
 # ----------------------------------------------------------------------------
 
 class FetchError(Exception):
     pass
 
 
-async def _get_html(session: aiohttp.ClientSession, url: str) -> str:
-    async with session.get(url, headers=HEADERS, timeout=aiohttp.ClientTimeout(total=20)) as resp:
-        if resp.status != 200:
-            raise FetchError(f"HTTP {resp.status} for {url}")
-        return await resp.text()
-
-
-def _extract_from_nuxt_state(html: str):
-    """Eldorado's front end looks Nuxt-based; SSR'd pages often embed a
-    window.__NUXT__={...} (or similar __NEXT_DATA__) JSON blob with the raw
-    offer data. Try to find a price/title inside it."""
-    for pattern in (r"window\.__NUXT__\s*=\s*(\{.*?\});?\s*</script>",
-                    r"<script[^>]*id=\"__NEXT_DATA__\"[^>]*>(\{.*?\})</script>"):
-        m = re.search(pattern, html, re.DOTALL)
-        if not m:
-            continue
-        try:
-            blob = m.group(1)
-            data = json.loads(blob)
-        except (json.JSONDecodeError, ValueError):
-            continue
-
-        found_price, found_name = None, None
-
-        def walk(node):
-            nonlocal found_price, found_name
-            if found_price is not None and found_name is not None:
-                return
-            if isinstance(node, dict):
-                for k, v in node.items():
-                    lk = k.lower()
-                    if found_price is None and lk in ("price", "unitprice", "priceperunit") and isinstance(v, (int, float)):
-                        found_price = float(v)
-                    if found_name is None and lk in ("title", "name", "itemname") and isinstance(v, str) and v.strip():
-                        found_name = v.strip()
-                    walk(v)
-            elif isinstance(node, list):
-                for item in node:
-                    walk(item)
-
-        walk(data)
-        if found_price is not None:
-            return found_price, found_name
-    return None, None
-
-
-def _extract_from_meta(html: str):
-    price = None
-    name = None
-    m = re.search(r'(?:property|name)="(?:og:price:amount|product:price:amount)"\s+content="([\d.,]+)"', html)
-    if m:
-        try:
-            price = float(m.group(1).replace(",", ""))
-        except ValueError:
-            pass
-    m = re.search(r'(?:property|name)="og:title"\s+content="([^"]+)"', html)
-    if m:
-        name = m.group(1).strip()
-    return price, name
-
-
-def _extract_from_regex_fallback(html: str):
-    prices = [float(p.replace(",", "")) for p in PRICE_RE.findall(html)]
-    price = min(prices) if prices else None
-    m = re.search(r"<title>([^<]+)</title>", html)
-    name = m.group(1).split("|")[0].strip() if m else None
-    return price, name
+OFFER_ID_RE = re.compile(r"/oi/([0-9a-fA-F-]{36})")
+API_URL_TEMPLATE = "https://www.eldorado.gg/api/v1/item-management/offers/{offer_id}?includeProduct=true"
 
 
 async def fetch_listing(session: aiohttp.ClientSession, url: str):
-    """Returns (price: float, name: str) for a given Eldorado listing URL."""
-    html = await _get_html(session, url)
+    """Returns (price: float, name: str) for a given Eldorado listing URL,
+    by calling Eldorado's internal offer API directly instead of scraping HTML."""
+    match = OFFER_ID_RE.search(url)
+    if not match:
+        raise FetchError(
+            "Couldn't find an offer ID in that link — make sure it's a direct "
+            "listing URL containing '/oi/<id>', not a search/category page."
+        )
+    offer_id = match.group(1)
+    api_url = API_URL_TEMPLATE.format(offer_id=offer_id)
 
-    for extractor in (_extract_from_nuxt_state, _extract_from_meta, _extract_from_regex_fallback):
-        price, name = extractor(html)
-        if price is not None:
-            return price, (name or url)
+    request_headers = {**HEADERS, "Accept": "application/json", "Referer": url}
 
-    raise FetchError(f"Could not find a price on {url}")
+    async with session.get(api_url, headers=request_headers, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+        if resp.status != 200:
+            raise FetchError(f"HTTP {resp.status} from Eldorado's API for offer {offer_id}")
+        try:
+            data = await resp.json(content_type=None)
+        except (aiohttp.ContentTypeError, json.JSONDecodeError) as e:
+            raise FetchError(f"Unexpected (non-JSON) response from Eldorado's API: {e}")
+
+    try:
+        offer = data["offer"]
+        price = float(offer["pricePerUnitInUSD"]["amount"])
+        name = offer.get("offerTitle") or offer.get("description") or offer_id
+    except (KeyError, TypeError, ValueError) as e:
+        raise FetchError(f"Unexpected shape in Eldorado's API response: {e}")
+
+    return price, name
 
 
 # ----------------------------------------------------------------------------
