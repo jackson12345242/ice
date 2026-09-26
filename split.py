@@ -306,8 +306,12 @@ class Split(commands.Cog):
         await interaction.response.send_message(embed=embed)
 
     @split_group.command(name="complete", description="Mark a person's share of the active split as paid")
-    @app_commands.describe(user="The person who paid their share")
-    async def split_complete(self, interaction: discord.Interaction, user: discord.Member):
+    @app_commands.describe(
+        user="Whose share to mark as paid",
+        sender="Whose saved wallet actually sent the money, if different from user (e.g. someone paid on their behalf)",
+    )
+    async def split_complete(self, interaction: discord.Interaction, user: discord.Member, sender: discord.Member = None):
+        sender = sender or user
         await interaction.response.send_message(
             "⏳ Hang Tight! Checking the blockchain for a recent payment.", ephemeral=True
         )
@@ -325,7 +329,7 @@ class Split(commands.Cog):
             return
 
         creator_wallets = await db.get_wallets(split["creator_id"])
-        payer_wallets = await db.get_wallets(user.id)
+        payer_wallets = await db.get_wallets(sender.id)
 
         if not creator_wallets:
             await interaction.edit_original_response(
@@ -334,7 +338,7 @@ class Split(commands.Cog):
             return
         if not payer_wallets:
             await interaction.edit_original_response(
-                content=f"{user.display_name} hasn't saved a payment address with `/wallet add`, so I can't match their payment."
+                content=f"{sender.display_name} hasn't saved a payment address with `/wallet add`, so I can't match their payment."
             )
             return
 
@@ -380,12 +384,12 @@ class Split(commands.Cog):
             if not (payer_coins & creator_coins):
                 log.info(
                     "Split coin mismatch: %s's wallets normalize to %s, %s's wallets normalize to %s — no overlap",
-                    user.display_name, payer_coins, self.bot.get_user(split["creator_id"]) or split["creator_id"], creator_coins,
+                    sender.display_name, payer_coins, self.bot.get_user(split["creator_id"]) or split["creator_id"], creator_coins,
                 )
             await interaction.edit_original_response(
                 content=(
                     f"Couldn't find a matching, unused payment of about ${per_person:,.2f} "
-                    f"from {user.display_name}'s saved address yet. Try again in a few minutes."
+                    f"from {sender.display_name}'s saved address yet. Try again in a few minutes."
                 )
             )
             return
@@ -394,9 +398,10 @@ class Split(commands.Cog):
         await db.mark_split_payment(split["id"], user.id, tx_id, amount_paid, used_coin)
         await db.mark_tx_used(tx_id, split["id"], user.id)
 
-        await interaction.edit_original_response(
-            content=f"✅ Verified — {user.display_name}'s payment is confirmed."
-        )
+        confirm_msg = f"✅ Verified — {user.display_name}'s payment is confirmed."
+        if sender.id != user.id:
+            confirm_msg += f" (paid by {sender.display_name})"
+        await interaction.edit_original_response(content=confirm_msg)
 
         channel = self.bot.get_channel(split["channel_id"])
         if channel is None:
@@ -405,7 +410,10 @@ class Split(commands.Cog):
             except discord.HTTPException:
                 channel = None
         if channel is not None:
-            await channel.send(f"✅ {user.mention} has paid their share of the split.")
+            notice = f"✅ {user.mention} has paid their share of the split."
+            if sender.id != user.id:
+                notice += f" (paid by {sender.mention})"
+            await channel.send(notice)
 
         creator = self.bot.get_user(split["creator_id"])
         if creator is None:
@@ -427,7 +435,11 @@ class Split(commands.Cog):
 
             dm_embed = discord.Embed(title="Split Payment Received", color=EMBED_COLOR, url=explorer_url)
             dm_embed.add_field(name="Brainrot", value=split["brainrot"], inline=False)
-            dm_embed.add_field(name="Paid by", value=user.display_name, inline=True)
+            dm_embed.add_field(
+                name="Paid by",
+                value=user.display_name if sender.id == user.id else f"{user.display_name} (sent by {sender.display_name})",
+                inline=True,
+            )
             dm_embed.add_field(name="Amount", value=f"${amount_paid:,.2f} ({used_coin})", inline=True)
             dm_embed.add_field(name="Transaction ID", value=f"`{tx_id}`", inline=False)
             if explorer_url:
