@@ -410,3 +410,11 @@ async def clear_payment_brainrot(user_id: int, brainrot_key: str = None, directi
 
 async def adjust_payment_brainrot(user_id: int, brainrot_key: str, quantity: int, direction: str):
     await log_payment_brainrot(user_id, brainrot_key, None, -quantity, None, direction)
+
+
+async def clear_all_payments():
+    """Deletes every row from payment_logs — resets money + brainrot logs (paid and
+    received) for every user. Does not touch fund_items/fund_money or splits."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM payment_logs")
+        await db.commit()
