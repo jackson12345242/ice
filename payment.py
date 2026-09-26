@@ -60,6 +60,37 @@ class LeaderboardView(discord.ui.View):
         await interaction.response.edit_message(embed=self.brainrot_embed)
 
 
+class ConfirmResetView(discord.ui.View):
+    """Confirm/cancel gate for destructive, all-user resets. Only the admin who invoked
+    the command can press either button; times out after 30s with no action taken."""
+
+    def __init__(self, author_id: int):
+        super().__init__(timeout=30)
+        self.author_id = author_id
+        self.confirmed = False
+
+    async def _guard(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("This confirmation isn't for you.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Confirm Reset", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._guard(interaction):
+            return
+        self.confirmed = True
+        self.stop()
+        await interaction.response.edit_message(content="✅ All logged payments have been reset.", view=None)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._guard(interaction):
+            return
+        self.stop()
+        await interaction.response.edit_message(content="Cancelled — no changes made.", view=None)
+
+
 class Payment(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -294,6 +325,26 @@ class Payment(commands.Cog):
                 desc = f"removed {int(amount)}x {brainrot.name} ({type.name})"
 
         await interaction.response.send_message(f"Done — {desc} for {user.display_name}.", ephemeral=True)
+
+    # ---------------- /payment resetall ----------------
+    @payment_group.command(name="resetall", description="Reset ALL logged payments for every user (admin only)")
+    async def payment_reset_all(self, interaction: discord.Interaction):
+        if interaction.user.id != PAYMENT_ADMIN_USER_ID:
+            await interaction.response.send_message(
+                "You don't have permission to use this command.", ephemeral=True
+            )
+            return
+
+        view = ConfirmResetView(interaction.user.id)
+        await interaction.response.send_message(
+            "⚠️ This will permanently delete **all** logged payments (money + brainrots, paid and received) "
+            "for **every user**. This cannot be undone. Are you sure?",
+            view=view,
+            ephemeral=True,
+        )
+        await view.wait()
+        if view.confirmed:
+            await db.clear_all_payments()
 
     # ---------------- /brainrot received ----------------
     @brainrot_group.command(name="received", description="View what brainrots a user has received")
