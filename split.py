@@ -23,7 +23,35 @@ from config import (
 # SPLIT_REMINDER_HOURS threshold. Doesn't need to be frequent — it only fires once
 # per split thanks to the reminder_sent flag.
 REMINDER_CHECK_INTERVAL_MINUTES = 15
-from wallet import WalletView
+
+
+class SentButton(discord.ui.Button):
+    """Runs the same verification /split complete does, for whoever clicks it."""
+
+    def __init__(self, split_id: int):
+        super().__init__(label="Sent?", style=discord.ButtonStyle.success, custom_id=f"split_sent:{split_id}")
+        self.split_id = split_id
+
+    async def callback(self, interaction: discord.Interaction):
+        cog = interaction.client.get_cog("Split")
+        if cog is None:
+            await interaction.response.send_message(
+                "Something went wrong — use `/split complete` instead.", ephemeral=True
+            )
+            return
+        await cog.handle_sent_button(interaction, self.split_id)
+
+
+class ReminderView(discord.ui.View):
+    """Attached to reminder DMs: the creator's payment-address buttons (reused
+    from wallet.py) plus a 'Sent?' button that self-checks the clicker's payment."""
+
+    def __init__(self, wallets: list[dict], split_id: int):
+        super().__init__(timeout=None)
+        for w in wallets:
+            self.add_item(AddressButton(w["coin"], w["network"], w["address"]))
+        self.add_item(SentButton(split_id))
+from wallet import WalletView, AddressButton
 from coins import normalize_coin
 
 # BSCTrace (via MegaNode) is the current recommended replacement for the deprecated
@@ -266,12 +294,19 @@ class Split(commands.Cog):
         return unpaid
 
     async def _send_reminders(self, split: dict) -> tuple[int, int]:
-        """DMs every unpaid member. Returns (reminded_count, failed_count)."""
+        """DMs every unpaid member, with address buttons + a 'Sent?' self-check
+        button. Returns (reminded_count, failed_count)."""
         unpaid = await self._unpaid_members(split)
         if not unpaid:
             return 0, 0
 
         per_person = split["per_person_amount"]
+        creator_wallets = await db.get_wallets(split["creator_id"])
+        # One view is reused across every DM — it's stateless per-recipient
+        # (the button reads interaction.user at click time), so this is safe
+        # and avoids rebuilding it once per member.
+        view = ReminderView(creator_wallets, split["id"])
+
         reminded = 0
         failed = 0
         for member in unpaid:
@@ -281,9 +316,12 @@ class Split(commands.Cog):
                 color=EMBED_COLOR,
             )
             embed.add_field(name="Amount Due", value=f"${per_person:,.2f}", inline=True)
-            embed.set_footer(text="Pay, then ask an admin to run /split complete for you.")
+            if creator_wallets:
+                embed.set_footer(text="Tap an address to copy it, then hit Sent? once you've paid.")
+            else:
+                embed.set_footer(text="Hit Sent? once you've paid the split creator.")
             try:
-                await member.send(embed=embed)
+                await member.send(embed=embed, view=view)
                 reminded += 1
             except discord.HTTPException:
                 failed += 1
@@ -398,42 +436,24 @@ class Split(commands.Cog):
 
         await interaction.response.send_message(embed=embed)
 
-    @split_group.command(name="complete", description="Mark a person's share of the active split as paid")
-    @app_commands.describe(
-        user="Whose share to mark as paid",
-        sender="Whose saved wallet actually sent the money, if different from user (e.g. someone paid on their behalf)",
-    )
-    async def split_complete(self, interaction: discord.Interaction, user: discord.Member, sender: discord.Member = None):
-        sender = sender or user
-        await interaction.response.send_message(
-            "⏳ Hang Tight! Checking the blockchain for a recent payment.", ephemeral=True
-        )
-
-        split = await db.get_active_split()
-        if split is None:
-            await interaction.edit_original_response(content="There's no active split right now.")
-            return
-
+    async def _verify_and_credit(self, split: dict, user: discord.Member, sender: discord.Member):
+        """The blockchain-verification logic shared by /split complete and the
+        reminder DM's 'Sent?' button. Returns (status, data):
+            status: "already_paid" | "no_creator_wallet" | "no_sender_wallet" |
+                    "no_match" | "success"
+            data:   None, except for "success" -> (tx_id, amount_paid, used_coin)
+        """
         already = await db.get_split_payment(split["id"], user.id)
         if already and already["paid"]:
-            await interaction.edit_original_response(
-                content=f"{user.display_name} is already marked as paid for this split."
-            )
-            return
+            return "already_paid", None
 
         creator_wallets = await db.get_wallets(split["creator_id"])
         payer_wallets = await db.get_wallets(sender.id)
 
         if not creator_wallets:
-            await interaction.edit_original_response(
-                content="The split creator hasn't saved a payment address, so I can't verify anything."
-            )
-            return
+            return "no_creator_wallet", None
         if not payer_wallets:
-            await interaction.edit_original_response(
-                content=f"{sender.display_name} hasn't saved a payment address with `/wallet add`, so I can't match their payment."
-            )
-            return
+            return "no_sender_wallet", None
 
         per_person = split["per_person_amount"]
         result = None
@@ -479,23 +499,14 @@ class Split(commands.Cog):
                     "Split coin mismatch: %s's wallets normalize to %s, %s's wallets normalize to %s — no overlap",
                     sender.display_name, payer_coins, self.bot.get_user(split["creator_id"]) or split["creator_id"], creator_coins,
                 )
-            await interaction.edit_original_response(
-                content=(
-                    f"Couldn't find a matching, unused payment of about ${per_person:,.2f} "
-                    f"from {sender.display_name}'s saved address yet. Try again in a few minutes."
-                )
-            )
-            return
+            return "no_match", None
 
         tx_id, amount_paid = result
         await db.mark_split_payment(split["id"], user.id, tx_id, amount_paid, used_coin)
         await db.mark_tx_used(tx_id, split["id"], user.id)
+        return "success", (tx_id, amount_paid, used_coin)
 
-        confirm_msg = f"✅ Verified — {user.display_name}'s payment is confirmed."
-        if sender.id != user.id:
-            confirm_msg += f" (paid by {sender.display_name})"
-        await interaction.edit_original_response(content=confirm_msg)
-
+    async def _notify_payment_confirmed(self, split: dict, user: discord.Member, sender: discord.Member, tx_id: str, amount_paid: float, used_coin: str):
         channel = self.bot.get_channel(split["channel_id"])
         if channel is None:
             try:
@@ -550,6 +561,103 @@ class Split(commands.Cog):
                 await creator.send(embed=dm_embed)
             except discord.HTTPException:
                 pass
+
+    async def handle_sent_button(self, interaction: discord.Interaction, split_id: int):
+        """Callback target for the reminder DM's 'Sent?' button — runs the same
+        check /split complete does, for whoever clicked it."""
+        split = await db.get_active_split()
+        if split is None or split["id"] != split_id:
+            await interaction.response.send_message(
+                "This split has ended — no need to check anymore.", ephemeral=True
+            )
+            return
+
+        user = interaction.user
+        sender = user
+
+        await interaction.response.send_message(
+            "⏳ Checking the blockchain for your payment...", ephemeral=True
+        )
+
+        status, data = await self._verify_and_credit(split, user, sender)
+
+        if status == "already_paid":
+            await interaction.edit_original_response(content="You're already marked as paid — thank you!")
+            return
+        if status == "no_creator_wallet":
+            await interaction.edit_original_response(
+                content="The split creator hasn't saved a payment address, so this can't be verified yet."
+            )
+            return
+        if status == "no_sender_wallet":
+            await interaction.edit_original_response(
+                content="You haven't saved a payment address with `/wallet add` yet, so I can't match your payment."
+            )
+            return
+        if status == "no_match":
+            per_person = split["per_person_amount"]
+            await interaction.edit_original_response(
+                content=(
+                    f"Didn't find a matching payment of about ${per_person:,.2f} from your saved "
+                    f"address yet — try again in about a minute."
+                )
+            )
+            return
+
+        tx_id, amount_paid, used_coin = data
+        await interaction.edit_original_response(content="✅ Verified — you're marked as paid. Thank you!")
+        await self._notify_payment_confirmed(split, user, sender, tx_id, amount_paid, used_coin)
+
+    @split_group.command(name="complete", description="Mark a person's share of the active split as paid")
+    @app_commands.describe(
+        user="Whose share to mark as paid",
+        sender="Whose saved wallet actually sent the money, if different from user (e.g. someone paid on their behalf)",
+    )
+    async def split_complete(self, interaction: discord.Interaction, user: discord.Member, sender: discord.Member = None):
+        sender = sender or user
+        await interaction.response.send_message(
+            "⏳ Hang Tight! Checking the blockchain for a recent payment.", ephemeral=True
+        )
+
+        split = await db.get_active_split()
+        if split is None:
+            await interaction.edit_original_response(content="There's no active split right now.")
+            return
+
+        status, data = await self._verify_and_credit(split, user, sender)
+
+        if status == "already_paid":
+            await interaction.edit_original_response(
+                content=f"{user.display_name} is already marked as paid for this split."
+            )
+            return
+        if status == "no_creator_wallet":
+            await interaction.edit_original_response(
+                content="The split creator hasn't saved a payment address, so I can't verify anything."
+            )
+            return
+        if status == "no_sender_wallet":
+            await interaction.edit_original_response(
+                content=f"{sender.display_name} hasn't saved a payment address with `/wallet add`, so I can't match their payment."
+            )
+            return
+        if status == "no_match":
+            per_person = split["per_person_amount"]
+            await interaction.edit_original_response(
+                content=(
+                    f"Couldn't find a matching, unused payment of about ${per_person:,.2f} "
+                    f"from {sender.display_name}'s saved address yet. Try again in about a minute."
+                )
+            )
+            return
+
+        tx_id, amount_paid, used_coin = data
+        confirm_msg = f"✅ Verified — {user.display_name}'s payment is confirmed."
+        if sender.id != user.id:
+            confirm_msg += f" (paid by {sender.display_name})"
+        await interaction.edit_original_response(content=confirm_msg)
+
+        await self._notify_payment_confirmed(split, user, sender, tx_id, amount_paid, used_coin)
 
     @split_group.command(name="add", description="Manually mark someone's split share as paid — no blockchain check (admin only)")
     @app_commands.describe(
@@ -647,7 +755,16 @@ class Split(commands.Cog):
             return
 
         await interaction.response.defer(thinking=True, ephemeral=True)
-        reminded, failed = await self._send_reminders(split)
+
+        try:
+            reminded, failed = await self._send_reminders(split)
+        except Exception:
+            log.exception("Manual /reminder send failed for split %s", split["id"])
+            await interaction.followup.send(
+                "Something went wrong sending reminders — check the bot's logs. "
+                "(Common cause: the Members intent isn't enabled in the running deployment.)"
+            )
+            return
 
         if reminded == 0 and failed == 0:
             await interaction.followup.send("Everyone's already paid — no reminders needed.")
