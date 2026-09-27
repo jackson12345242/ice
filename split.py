@@ -302,11 +302,17 @@ class Split(commands.Cog):
         if created.tzinfo is None:
             created = created.replace(tzinfo=datetime.timezone.utc)
 
-        if datetime.datetime.now(datetime.timezone.utc) - created < datetime.timedelta(hours=SPLIT_REMINDER_HOURS):
-            return
+        try:
+            if datetime.datetime.now(datetime.timezone.utc) - created < datetime.timedelta(hours=SPLIT_REMINDER_HOURS):
+                return
 
-        await self._send_reminders(split)
-        await db.mark_split_reminder_sent(split["id"])
+            await self._send_reminders(split)
+            await db.mark_split_reminder_sent(split["id"])
+        except Exception:
+            # Never let an unhandled error kill this loop — discord.py stops a
+            # tasks.loop entirely after one uncaught exception, which would
+            # silently disable the 12h auto-reminder until the bot restarts.
+            log.exception("reminder_check_loop failed for split %s", split["id"])
 
     @reminder_check_loop.before_loop
     async def before_reminder_check_loop(self):
