@@ -1,3 +1,5 @@
+import random
+
 import aiosqlite
 from config import BRAINROTS
 
@@ -31,6 +33,23 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS fund_money (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 amount REAL NOT NULL DEFAULT 0
+            )
+            """
+        )
+        # NEW: ledger of individual fund contributions, so we know *who* gave what
+        # and can attribute removals back to a contributor instead of just an
+        # anonymous aggregate quantity. kind = 'brainrot' | 'money'; item_key is
+        # the brainrot key for 'brainrot' rows, NULL for 'money' rows.
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS fund_contributions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind TEXT NOT NULL,
+                item_key TEXT,
+                user_id INTEGER NOT NULL,
+                quantity REAL NOT NULL,
+                remaining REAL NOT NULL,
+                added_at TEXT NOT NULL DEFAULT (datetime('now'))
             )
             """
         )
@@ -191,6 +210,104 @@ async def get_money_total() -> float:
         cursor = await db.execute("SELECT amount FROM fund_money WHERE id = 1")
         row = await cursor.fetchone()
         return row[0] if row else 0.0
+
+
+# ---------- Fund: contributions (who gave what) ----------
+
+async def add_contribution(kind: str, item_key, user_id: int, amount: float):
+    """Logs one fund contribution as its own row so it can later be individually
+    drawn down by remove_contributions(). kind is 'brainrot' or 'money';
+    item_key is the brainrot key (or None for money)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO fund_contributions (kind, item_key, user_id, quantity, remaining)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (kind, item_key, user_id, amount, amount),
+        )
+        await db.commit()
+
+
+async def get_contributions(kind: str, item_key=None):
+    """Returns every still-outstanding (remaining > 0) contribution row for this
+    kind/item_key, oldest first."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        if item_key is not None:
+            cursor = await db.execute(
+                "SELECT id, user_id, quantity, remaining, added_at FROM fund_contributions "
+                "WHERE kind = ? AND item_key = ? AND remaining > 0 ORDER BY added_at",
+                (kind, item_key),
+            )
+        else:
+            cursor = await db.execute(
+                "SELECT id, user_id, quantity, remaining, added_at FROM fund_contributions "
+                "WHERE kind = ? AND item_key IS NULL AND remaining > 0 ORDER BY added_at",
+                (kind,),
+            )
+        rows = await cursor.fetchall()
+        return [
+            {"id": r[0], "user_id": r[1], "quantity": r[2], "remaining": r[3], "added_at": r[4]}
+            for r in rows
+        ]
+
+
+async def get_contribution_totals(kind: str, item_key=None):
+    """Returns {user_id: total_remaining} — the per-person breakdown used by
+    the /fund database view."""
+    contributions = await get_contributions(kind, item_key)
+    totals: dict[int, float] = {}
+    for c in contributions:
+        totals[c["user_id"]] = totals.get(c["user_id"], 0) + c["remaining"]
+    return totals
+
+
+async def _decrement_contribution(contribution_id: int, amount: float):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE fund_contributions SET remaining = remaining - ? WHERE id = ?",
+            (amount, contribution_id),
+        )
+        await db.commit()
+
+
+async def remove_contributions(kind: str, item_key, amount: float):
+    """Randomly attributes removing `amount` to one or more contributors who still
+    have remaining balance. Prefers a single contributor who alone has enough
+    (chosen at random among those who qualify); if nobody has enough alone, draws
+    from multiple random contributors until the amount is covered (oldest-agnostic —
+    order among eligible contributors is randomized, not FIFO).
+
+    Returns (taken, shortfall):
+        taken = [{"user_id": int, "amount": float}, ...] — who it came from and how much
+        shortfall = amount that couldn't be attributed to anyone (e.g. quantity was
+                    added before contribution tracking existed, or is already
+                    fully drawn down)
+    """
+    contributions = await get_contributions(kind, item_key)
+    random.shuffle(contributions)
+
+    taken = []
+    remaining_to_take = amount
+
+    single_candidates = [c for c in contributions if c["remaining"] >= amount]
+    if single_candidates:
+        chosen = random.choice(single_candidates)
+        await _decrement_contribution(chosen["id"], amount)
+        taken.append({"user_id": chosen["user_id"], "amount": amount})
+        remaining_to_take = 0
+    else:
+        for c in contributions:
+            if remaining_to_take <= 0:
+                break
+            take = min(c["remaining"], remaining_to_take)
+            if take <= 0:
+                continue
+            await _decrement_contribution(c["id"], take)
+            taken.append({"user_id": c["user_id"], "amount": take})
+            remaining_to_take -= take
+
+    return taken, remaining_to_take
 
 
 # ---------- Splits ----------
