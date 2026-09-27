@@ -31,6 +31,7 @@ class Fund(commands.Cog):
         amount="How many of the brainrot to add (defaults to 1 if brainrot is picked)",
         brainrot="Which brainrot to add (optional)",
         money="How much money to add to the fund (optional)",
+        user="Who actually gave this? Defaults to you if left blank.",
     )
     @app_commands.choices(brainrot=BRAINROT_CHOICES)
     async def fund_add(
@@ -39,6 +40,7 @@ class Fund(commands.Cog):
         amount: int = None,
         brainrot: app_commands.Choice[str] = None,
         money: float = None,
+        user: discord.Member = None,
     ):
         if brainrot is None and money is None:
             await interaction.response.send_message(
@@ -47,23 +49,29 @@ class Fund(commands.Cog):
             )
             return
 
+        contributor = user or interaction.user
         added_lines = []
 
         if brainrot is not None:
             qty = amount if amount is not None else 1
             await db.add_brainrot(brainrot.value, qty)
+            await db.add_contribution("brainrot", brainrot.value, contributor.id, qty)
             added_lines.append(f"**{qty}x {brainrot.name}**")
 
         if money is not None:
             await db.add_money(money)
+            await db.add_contribution("money", None, contributor.id, money)
             added_lines.append(f"**${money:,.2f}**")
 
         summary = " and ".join(added_lines)
-        await interaction.response.send_message(f"Added {summary} to the fund.", ephemeral=True)
+        from_note = f" (from {contributor.mention})" if contributor.id != interaction.user.id else ""
+        await interaction.response.send_message(
+            f"Added {summary} to the fund{from_note}.", ephemeral=True
+        )
 
-        await self._log(interaction.user, f"➕ Added {summary} to the fund.")
+        await self._log(interaction.user, f"➕ Added {summary} to the fund — given by {contributor.mention}.")
 
-    # ---------------- /fund ----------------
+    # ---------------- /fund view ----------------
     @fund_group.command(name="view", description="Show the current fund balance")
     async def fund_view(self, interaction: discord.Interaction):
         totals = await db.get_brainrot_totals()
@@ -91,6 +99,56 @@ class Fund(commands.Cog):
             embeds.append(e)
 
         await interaction.response.send_message(embeds=embeds, files=files)
+
+    # ---------------- /fund database ----------------
+    @fund_group.command(name="database", description="Show who contributed what to the fund")
+    @app_commands.describe(brainrot="Only show one brainrot's contributors (optional)")
+    @app_commands.choices(brainrot=BRAINROT_CHOICES)
+    async def fund_database(
+        self, interaction: discord.Interaction, brainrot: app_commands.Choice[str] = None
+    ):
+        embeds = []
+
+        keys_to_show = [brainrot.value] if brainrot else list(BRAINROTS.keys())
+        for key in keys_to_show:
+            totals = await db.get_contribution_totals("brainrot", key)
+            if not totals:
+                continue
+            lines = [
+                f"<@{uid}> — {int(qty)}x"
+                for uid, qty in sorted(totals.items(), key=lambda kv: -kv[1])
+            ]
+            embeds.append(
+                discord.Embed(
+                    title=f"{BRAINROTS[key]['label']} contributors",
+                    description="\n".join(lines),
+                    color=EMBED_COLOR,
+                )
+            )
+
+        money_totals = await db.get_contribution_totals("money")
+        if money_totals and brainrot is None:
+            lines = [
+                f"<@{uid}> — ${amt:,.2f}"
+                for uid, amt in sorted(money_totals.items(), key=lambda kv: -kv[1])
+            ]
+            embeds.append(
+                discord.Embed(
+                    title="Money contributors",
+                    description="\n".join(lines),
+                    color=EMBED_COLOR,
+                )
+            )
+
+        if not embeds:
+            await interaction.response.send_message(
+                "No contributions on record yet — this only tracks fund additions made "
+                "with `/fund add` going forward.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_message(embeds=embeds[:10])
 
     # ---------------- /remove fund ----------------
     @remove_group.command(name="fund", description="Remove brainrots or money from the fund (restricted)")
@@ -125,14 +183,37 @@ class Fund(commands.Cog):
                     "Pick which `brainrot` to remove.", ephemeral=True
                 )
                 return
-            await db.remove_brainrot(brainrot.value, int(amount))
-            desc = f"**{int(amount)}x {brainrot.name}**"
+            qty = int(amount)
+            await db.remove_brainrot(brainrot.value, qty)
+            taken, shortfall = await db.remove_contributions("brainrot", brainrot.value, qty)
+            desc = f"**{qty}x {brainrot.name}**"
+            from_text = self._format_taken(taken, is_money=False)
         else:
             await db.remove_money(amount)
+            taken, shortfall = await db.remove_contributions("money", None, amount)
             desc = f"**${amount:,.2f}**"
+            from_text = self._format_taken(taken, is_money=True)
 
-        await interaction.response.send_message(f"Removed {desc} from the fund.", ephemeral=True)
-        await self._log(interaction.user, f"➖ Removed {desc} from the fund.")
+        message = f"Removed {desc} from the fund"
+        if from_text:
+            message += f" (taken from {from_text})"
+        if shortfall > 0:
+            leftover = int(shortfall) if type.value == "brainrot" else shortfall
+            message += f" — {leftover} of that had no contributor record on file"
+        message += "."
+
+        await interaction.response.send_message(message, ephemeral=True)
+        await self._log(interaction.user, f"➖ Removed {desc} from the fund" + (f" (from {from_text})" if from_text else "") + ".")
+
+    @staticmethod
+    def _format_taken(taken: list, is_money: bool) -> str:
+        if not taken:
+            return ""
+        parts = []
+        for t in taken:
+            amt = f"${t['amount']:,.2f}" if is_money else f"{int(t['amount'])}x"
+            parts.append(f"{amt} from <@{t['user_id']}>")
+        return ", ".join(parts)
 
     async def _log(self, actor: discord.abc.User, text: str):
         channel = self.bot.get_channel(FUND_LOG_CHANNEL_ID)
