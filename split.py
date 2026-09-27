@@ -4,7 +4,7 @@ import logging
 import aiohttp
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 import database as db
 from config import (
@@ -15,8 +15,14 @@ from config import (
     USDT_BEP20_CONTRACT,
     SPLIT_PAYMENT_TOLERANCE,
     SPLIT_PAYMENT_WINDOW_MINUTES,
+    SPLIT_REMINDER_HOURS,
     FUND_ADMIN_USER_ID,
 )
+
+# How often the background loop checks whether the active split has crossed the
+# SPLIT_REMINDER_HOURS threshold. Doesn't need to be frequent — it only fires once
+# per split thanks to the reminder_sent flag.
+REMINDER_CHECK_INTERVAL_MINUTES = 15
 from wallet import WalletView
 from coins import normalize_coin
 
@@ -225,6 +231,86 @@ class Split(commands.Cog):
         self.bot = bot
 
     split_group = app_commands.Group(name="split", description="Split a brainrot cost across the team")
+    reminder_group = app_commands.Group(name="reminder", description="Payment reminders for the active split")
+
+    async def cog_load(self):
+        self.reminder_check_loop.start()
+
+    async def cog_unload(self):
+        self.reminder_check_loop.cancel()
+
+    async def _unpaid_members(self, split: dict):
+        """Returns the list of non-bot guild members who haven't paid this split yet,
+        excluding the split's creator (they're the one receiving money, not owing it)."""
+        channel = self.bot.get_channel(split["channel_id"])
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(split["channel_id"])
+            except discord.HTTPException:
+                return None  # signal: couldn't resolve the channel/guild at all
+
+        guild = getattr(channel, "guild", None)
+        if guild is None:
+            return None
+
+        paid_user_ids = set(await db.get_split_paid_users(split["id"]))
+        unpaid = []
+        async for member in guild.fetch_members(limit=None):
+            if member.bot:
+                continue
+            if member.id == split["creator_id"]:
+                continue
+            if member.id in paid_user_ids:
+                continue
+            unpaid.append(member)
+        return unpaid
+
+    async def _send_reminders(self, split: dict) -> tuple[int, int]:
+        """DMs every unpaid member. Returns (reminded_count, failed_count)."""
+        unpaid = await self._unpaid_members(split)
+        if not unpaid:
+            return 0, 0
+
+        per_person = split["per_person_amount"]
+        reminded = 0
+        failed = 0
+        for member in unpaid:
+            embed = discord.Embed(
+                title="💸 Split Payment Reminder",
+                description=f"You haven't paid your share yet for **{split['brainrot']}**.",
+                color=EMBED_COLOR,
+            )
+            embed.add_field(name="Amount Due", value=f"${per_person:,.2f}", inline=True)
+            embed.set_footer(text="Pay, then ask an admin to run /split complete for you.")
+            try:
+                await member.send(embed=embed)
+                reminded += 1
+            except discord.HTTPException:
+                failed += 1
+        return reminded, failed
+
+    @tasks.loop(minutes=REMINDER_CHECK_INTERVAL_MINUTES)
+    async def reminder_check_loop(self):
+        split = await db.get_active_split()
+        if split is None or split["reminder_sent"]:
+            return
+
+        try:
+            created = datetime.datetime.fromisoformat(split["created_at"])
+        except (TypeError, ValueError):
+            return
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=datetime.timezone.utc)
+
+        if datetime.datetime.now(datetime.timezone.utc) - created < datetime.timedelta(hours=SPLIT_REMINDER_HOURS):
+            return
+
+        await self._send_reminders(split)
+        await db.mark_split_reminder_sent(split["id"])
+
+    @reminder_check_loop.before_loop
+    async def before_reminder_check_loop(self):
+        await self.bot.wait_until_ready()
 
     @split_group.command(name="start", description="Start a new cost split for the team")
     @app_commands.describe(
@@ -539,6 +625,32 @@ class Split(commands.Cog):
                 await creator.send(embed=dm_embed)
             except discord.HTTPException:
                 pass
+
+
+    @reminder_group.command(name="send", description="Immediately DM everyone who hasn't paid the active split yet (admin only)")
+    async def reminder_send(self, interaction: discord.Interaction):
+        if interaction.user.id != FUND_ADMIN_USER_ID:
+            await interaction.response.send_message(
+                "You don't have permission to use this command.", ephemeral=True
+            )
+            return
+
+        split = await db.get_active_split()
+        if split is None:
+            await interaction.response.send_message("There's no active split right now.", ephemeral=True)
+            return
+
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        reminded, failed = await self._send_reminders(split)
+
+        if reminded == 0 and failed == 0:
+            await interaction.followup.send("Everyone's already paid — no reminders needed.")
+            return
+
+        msg = f"Sent reminders to {reminded} member(s)."
+        if failed:
+            msg += f" ({failed} couldn't be DMed — they likely have DMs closed to non-friends.)"
+        await interaction.followup.send(msg)
 
 
 async def setup(bot: commands.Bot):
