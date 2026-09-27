@@ -15,6 +15,7 @@ from config import (
     USDT_BEP20_CONTRACT,
     SPLIT_PAYMENT_TOLERANCE,
     SPLIT_PAYMENT_WINDOW_MINUTES,
+    FUND_ADMIN_USER_ID,
 )
 from wallet import WalletView
 from coins import normalize_coin
@@ -444,6 +445,87 @@ class Split(commands.Cog):
             dm_embed.add_field(name="Transaction ID", value=f"`{tx_id}`", inline=False)
             if explorer_url:
                 dm_embed.add_field(name="View Transaction", value=explorer_url, inline=False)
+            dm_embed.add_field(
+                name="Received So Far (this split)",
+                value=f"${total_received:,.2f} / ${split['total_amount']:,.2f} — {len(summary)}/{split['team_size']} paid",
+                inline=False,
+            )
+            if summary:
+                payer_lines = [f"<@{p['user_id']}> — ${p['amount_paid']:,.2f} ({p['coin']})" for p in summary]
+                dm_embed.add_field(name="People who've paid", value="\n".join(payer_lines), inline=False)
+
+            try:
+                await creator.send(embed=dm_embed)
+            except discord.HTTPException:
+                pass
+
+    @split_group.command(name="add", description="Manually mark someone's split share as paid — no blockchain check (admin only)")
+    @app_commands.describe(
+        user="Whose share to mark as paid",
+        amount="Amount to credit (defaults to the split's per-person share if left blank)",
+    )
+    async def split_add(self, interaction: discord.Interaction, user: discord.Member, amount: float = None):
+        if interaction.user.id != FUND_ADMIN_USER_ID:
+            await interaction.response.send_message(
+                "You don't have permission to use this command.", ephemeral=True
+            )
+            return
+
+        split = await db.get_active_split()
+        if split is None:
+            await interaction.response.send_message("There's no active split right now.", ephemeral=True)
+            return
+
+        already = await db.get_split_payment(split["id"], user.id)
+        if already and already["paid"]:
+            await interaction.response.send_message(
+                f"{user.display_name} is already marked as paid for this split.", ephemeral=True
+            )
+            return
+
+        credited_amount = amount if amount is not None else split["per_person_amount"]
+        # Synthetic, unique tx_id — this bypasses find_ltc_payments/find_usdt_bep20_payments
+        # entirely, so there's no real transaction to dedupe via used_tx_ids/mark_tx_used.
+        manual_tx_id = f"manual:{interaction.user.id}:{user.id}:{discord.utils.utcnow().timestamp()}"
+
+        await db.mark_split_payment(split["id"], user.id, manual_tx_id, credited_amount, "MANUAL")
+
+        await interaction.response.send_message(
+            f"✅ Marked {user.display_name}'s share (${credited_amount:,.2f}) as paid manually.",
+            ephemeral=True,
+        )
+
+        channel = self.bot.get_channel(split["channel_id"])
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(split["channel_id"])
+            except discord.HTTPException:
+                channel = None
+        if channel is not None:
+            await channel.send(
+                f"✅ {user.mention}'s share has been marked as paid by an admin ({interaction.user.mention})."
+            )
+
+        creator = self.bot.get_user(split["creator_id"])
+        if creator is None:
+            try:
+                creator = await self.bot.fetch_user(split["creator_id"])
+            except discord.HTTPException:
+                creator = None
+
+        if creator is not None:
+            summary = await db.get_split_summary(split["id"])
+            total_received = sum(p["amount_paid"] for p in summary)
+
+            dm_embed = discord.Embed(title="Split Payment Received", color=EMBED_COLOR)
+            dm_embed.add_field(name="Brainrot", value=split["brainrot"], inline=False)
+            dm_embed.add_field(name="Paid by", value=user.display_name, inline=True)
+            dm_embed.add_field(name="Amount", value=f"${credited_amount:,.2f}", inline=True)
+            dm_embed.add_field(
+                name="Verification",
+                value=f"Added by admin ({interaction.user.display_name})",
+                inline=False,
+            )
             dm_embed.add_field(
                 name="Received So Far (this split)",
                 value=f"${total_received:,.2f} / ${split['total_amount']:,.2f} — {len(summary)}/{split['team_size']} paid",
