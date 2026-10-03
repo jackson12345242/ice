@@ -1,4 +1,3 @@
-
 import os
 from dotenv import load_dotenv
 
@@ -51,6 +50,12 @@ PAYMENT_BRAINROTS = {
     "dragon_cannelloni": {"label": "Dragon Cannelloni", "asset": "assets/dragon_cannelloni.png", "tier": 2},
     "garama_madundung": {"label": "Garama / Madundung", "asset": "assets/garama.png", "tier": 1},
 }
+
+# --- Inactivity tracking ---
+INACTIVITY_LOG_CHANNEL_ID = 1555910412925403246  # the member inactivity report posts here
+INACTIVITY_ADMIN_USER_IDS = [FUND_ADMIN_USER_ID, 1416586612191658015]  # only these can force-send /inactivity database
+INACTIVITY_THRESHOLD_HOURS = 12  # no brainrot received logged in this long -> flagged inactive
+INACTIVITY_REPORT_INTERVAL_HOURS = 12  # how often the report auto-posts on its own
 
 # --- Rules ---
 RULES_LOG_CHANNEL_ID = 1555901101319000104  # every rule agreement gets logged here
