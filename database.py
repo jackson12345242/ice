@@ -90,12 +90,17 @@ async def init_db():
                 quantity INTEGER,
                 amount REAL,
                 image_url TEXT,
+                batch_id TEXT,
                 logged_at TEXT NOT NULL DEFAULT (datetime('now'))
             )
             """
         )
         try:
             await db.execute("ALTER TABLE payment_logs ADD COLUMN direction TEXT")
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE payment_logs ADD COLUMN batch_id TEXT")
         except Exception:
             pass
         await db.execute(
@@ -342,26 +347,26 @@ async def mark_split_payment(split_id: int, user_id: int, tx_id: str, amount_pai
 
 # ---------- Payment logs ----------
 
-async def log_payment_brainrot(user_id: int, brainrot_key: str, other_name: str, quantity: int, image_url: str, direction: str = "received"):
+async def log_payment_brainrot(user_id: int, brainrot_key: str, other_name: str, quantity: int, image_url: str, direction: str = "received", batch_id: str = None):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             """
-            INSERT INTO payment_logs (user_id, kind, brainrot_key, other_name, direction, quantity, amount, image_url)
-            VALUES (?, 'brainrot', ?, ?, ?, ?, NULL, ?)
+            INSERT INTO payment_logs (user_id, kind, brainrot_key, other_name, direction, quantity, amount, image_url, batch_id)
+            VALUES (?, 'brainrot', ?, ?, ?, ?, NULL, ?, ?)
             """,
-            (user_id, brainrot_key, other_name, direction, quantity, image_url),
+            (user_id, brainrot_key, other_name, direction, quantity, image_url, batch_id),
         )
         await db.commit()
 
 
-async def log_payment_money(user_id: int, amount: float, image_url: str = None):
+async def log_payment_money(user_id: int, amount: float, image_url: str = None, batch_id: str = None):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             """
-            INSERT INTO payment_logs (user_id, kind, brainrot_key, other_name, quantity, amount, image_url)
-            VALUES (?, 'money', NULL, NULL, NULL, ?, ?)
+            INSERT INTO payment_logs (user_id, kind, brainrot_key, other_name, quantity, amount, image_url, batch_id)
+            VALUES (?, 'money', NULL, NULL, NULL, ?, ?, ?)
             """,
-            (user_id, amount, image_url),
+            (user_id, amount, image_url, batch_id),
         )
         await db.commit()
 
@@ -444,6 +449,55 @@ async def clear_payment_brainrot(user_id: int, brainrot_key: str = None, directi
 
 async def adjust_payment_brainrot(user_id: int, brainrot_key: str, quantity: int, direction: str):
     await log_payment_brainrot(user_id, brainrot_key, None, -quantity, None, direction)
+
+
+async def get_last_brainrot_trade(user_id: int):
+    """Returns the user's most recent *real* received-brainrot log (quantity > 0, so
+    admin corrections via adjust_payment_brainrot — which log negative quantities —
+    are ignored), paired with whatever was given in that same batch. This doubles as
+    'last payment activity' for inactivity tracking, since every /payment log action
+    (trade or money payment) always logs a received-brainrot row in its batch.
+
+    Returns None if the user has never received a brainrot, else:
+    {
+        "logged_at": "YYYY-MM-DD HH:MM:SS" (UTC, sqlite's datetime('now') format),
+        "received": {"key": str, "other_name": str|None, "quantity": int},
+        "paid_brainrot": {"key": str, "other_name": str|None, "quantity": int} | None,
+        "paid_money": float | None,
+    }
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT brainrot_key, other_name, quantity, logged_at, batch_id FROM payment_logs "
+            "WHERE user_id = ? AND kind = 'brainrot' AND direction = 'received' AND quantity > 0 "
+            "ORDER BY id DESC LIMIT 1",
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+
+        key, other_name, qty, logged_at, batch_id = row
+        result = {
+            "logged_at": logged_at,
+            "received": {"key": key, "other_name": other_name, "quantity": qty},
+            "paid_brainrot": None,
+            "paid_money": None,
+        }
+
+        if batch_id:
+            cursor2 = await db.execute(
+                "SELECT kind, brainrot_key, other_name, quantity, amount FROM payment_logs "
+                "WHERE user_id = ? AND batch_id = ? AND (direction != 'received' OR direction IS NULL)",
+                (user_id, batch_id),
+            )
+            for kind, p_key, p_other_name, p_qty, p_amount in await cursor2.fetchall():
+                if kind == "brainrot" and p_qty and p_qty > 0:
+                    result["paid_brainrot"] = {"key": p_key, "other_name": p_other_name, "quantity": p_qty}
+                elif kind == "money" and p_amount and p_amount > 0:
+                    result["paid_money"] = p_amount
+
+        return result
 
 
 # ---------- Contributions (who gave what to the fund) ----------
