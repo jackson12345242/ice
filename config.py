@@ -60,3 +60,6 @@ INACTIVITY_REPORT_INTERVAL_HOURS = 12  # how often the report auto-posts on its 
 # --- Rules ---
 RULES_LOG_CHANNEL_ID = 1555901101319000104  # every rule agreement gets logged here
 RULES_ADMIN_USER_ID = FUND_ADMIN_USER_ID  # only this user can use /rules send
+
+# --- Watchlist (Eldorado.gg price tracker) ---
+WATCHLIST_ALERT_CHANNEL_ID = 1553456408911937597  # TODO: replace with the real channel ID for price alerts
