@@ -1,5 +1,6 @@
 import difflib
 import os
+import uuid
 
 import discord
 from discord import app_commands
@@ -154,13 +155,14 @@ class Payment(commands.Cog):
         paid_key, paid_label = resolve_brainrot(payment_brainrot.value)
         recv_key, recv_label = resolve_typed_brainrot(recieved_brainrot)
         image_url = proof.url if proof else None
+        batch_id = str(uuid.uuid4())
 
         # quantity only scales the paid brainrot — the received brainrot is always 1x
         await db.log_payment_brainrot(
-            interaction.user.id, paid_key, paid_label if paid_key == "other" else None, quantity, image_url, "paid"
+            interaction.user.id, paid_key, paid_label if paid_key == "other" else None, quantity, image_url, "paid", batch_id
         )
         await db.log_payment_brainrot(
-            interaction.user.id, recv_key, recv_label if recv_key == "other" else None, 1, image_url, "received"
+            interaction.user.id, recv_key, recv_label if recv_key == "other" else None, 1, image_url, "received", batch_id
         )
 
         embed = discord.Embed(title="🔄 Brainrot Trade Logged", color=EMBED_COLOR)
@@ -194,10 +196,11 @@ class Payment(commands.Cog):
     ):
         recv_key, recv_label = resolve_typed_brainrot(recieved_brainrot)
         image_url = proof.url if proof else None
+        batch_id = str(uuid.uuid4())
 
-        await db.log_payment_money(interaction.user.id, money_given, image_url)
+        await db.log_payment_money(interaction.user.id, money_given, image_url, batch_id)
         await db.log_payment_brainrot(
-            interaction.user.id, recv_key, recv_label if recv_key == "other" else None, quantity, image_url, "received"
+            interaction.user.id, recv_key, recv_label if recv_key == "other" else None, quantity, image_url, "received", batch_id
         )
 
         embed = discord.Embed(title="💵 Money Payment Logged", color=EMBED_COLOR)
