@@ -100,6 +100,18 @@ async def init_db():
             pass
         await db.execute(
             """
+            CREATE TABLE IF NOT EXISTS contributions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind TEXT NOT NULL,
+                brainrot_key TEXT,
+                user_id INTEGER NOT NULL,
+                amount REAL NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            """
+        )
+        await db.execute(
+            """
             CREATE TABLE IF NOT EXISTS rule_agreements (
                 user_id INTEGER PRIMARY KEY,
                 agreed_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -432,6 +444,67 @@ async def clear_payment_brainrot(user_id: int, brainrot_key: str = None, directi
 
 async def adjust_payment_brainrot(user_id: int, brainrot_key: str, quantity: int, direction: str):
     await log_payment_brainrot(user_id, brainrot_key, None, -quantity, None, direction)
+
+
+# ---------- Contributions (who gave what to the fund) ----------
+
+async def add_contribution(kind: str, brainrot_key: str, user_id: int, amount: float):
+    """kind is 'brainrot' or 'money'. brainrot_key is the brainrot's key for 'brainrot'
+    contributions, or None for 'money' ones."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO contributions (kind, brainrot_key, user_id, amount) VALUES (?, ?, ?, ?)",
+            (kind, brainrot_key, user_id, amount),
+        )
+        await db.commit()
+
+
+async def get_contribution_totals(kind: str, brainrot_key: str = None) -> dict:
+    """Returns {user_id: total_amount} for this kind (and brainrot_key, if given),
+    only including contributors whose running total is still > 0."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT user_id, SUM(amount) FROM contributions "
+            "WHERE kind = ? AND brainrot_key IS ? "
+            "GROUP BY user_id HAVING SUM(amount) > 0",
+            (kind, brainrot_key),
+        )
+        rows = await cursor.fetchall()
+        return {r[0]: r[1] for r in rows}
+
+
+async def remove_contributions(kind: str, brainrot_key: str, amount: float):
+    """Consumes `amount` from the oldest still-positive contribution records for this
+    kind/brainrot_key (FIFO — first contributed, first removed), reducing each record's
+    remaining amount as it goes. Returns (taken, shortfall):
+        taken: [{'user_id': ..., 'amount': ...}, ...] — how much was taken from whom
+        shortfall: amount that couldn't be matched to any contributor record
+    """
+    taken = []
+    remaining = amount
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT id, user_id, amount FROM contributions "
+            "WHERE kind = ? AND brainrot_key IS ? AND amount > 0 "
+            "ORDER BY id ASC",
+            (kind, brainrot_key),
+        )
+        rows = await cursor.fetchall()
+
+        for row_id, user_id, row_amount in rows:
+            if remaining <= 0:
+                break
+            take = min(row_amount, remaining)
+            await db.execute(
+                "UPDATE contributions SET amount = ? WHERE id = ?",
+                (row_amount - take, row_id),
+            )
+            remaining -= take
+            taken.append({"user_id": user_id, "amount": take})
+
+        await db.commit()
+
+    return taken, remaining
 
 
 # ---------- Rule agreements ----------
