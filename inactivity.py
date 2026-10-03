@@ -62,76 +62,95 @@ class Inactivity(commands.Cog):
     async def cog_unload(self):
         self.auto_report_loop.cancel()
 
-    async def _build_report_embed(self):
-        """Returns (embed, inactive_count). embed is None if nobody is currently
-        inactive or the guild/channel can't be resolved (inactive_count is 0 then)."""
+    @staticmethod
+    def _member_block(count: int, member: discord.Member, trade: dict) -> list:
+        lines = [f"**{count}. {member.display_name}**", f"*{member.display_name}'s Last received brainrot:*"]
+        if trade is None:
+            lines.append("No brainrot received on record yet.")
+        else:
+            lines.append(_format_trade_line(trade))
+        lines.append("")  # blank line between members
+        return lines
+
+    async def _build_report_embeds(self):
+        """Returns (inactive_embed, active_embed, inactive_count, active_count).
+        Both embeds are None if the guild/channel can't be resolved."""
         channel = self.bot.get_channel(INACTIVITY_LOG_CHANNEL_ID)
         if channel is None:
             try:
                 channel = await self.bot.fetch_channel(INACTIVITY_LOG_CHANNEL_ID)
             except discord.HTTPException:
                 log.warning("Couldn't resolve inactivity log channel %s", INACTIVITY_LOG_CHANNEL_ID)
-                return None, 0
+                return None, None, 0, 0
 
         guild = getattr(channel, "guild", None)
         if guild is None:
             log.warning("Inactivity log channel %s has no guild", INACTIVITY_LOG_CHANNEL_ID)
-            return None, 0
+            return None, None, 0, 0
 
         cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
             hours=INACTIVITY_THRESHOLD_HOURS
         )
 
-        lines = []
-        count = 0
+        inactive_lines, active_lines = [], []
+        inactive_count, active_count = 0, 0
+
         async for member in guild.fetch_members(limit=None):
             if member.bot:
                 continue
 
             trade = await db.get_last_brainrot_trade(member.id)
+            is_active = False
             if trade is not None:
                 logged_dt = datetime.datetime.strptime(
                     trade["logged_at"], "%Y-%m-%d %H:%M:%S"
                 ).replace(tzinfo=datetime.timezone.utc)
-                if logged_dt >= cutoff:
-                    continue  # active — skip
+                is_active = logged_dt >= cutoff
 
-            count += 1
-            lines.append(f"**{count}. {member.display_name}**")
-            lines.append(f"*{member.display_name}'s Last received brainrot:*")
-            if trade is None:
-                lines.append("No brainrot received on record yet.")
+            if is_active:
+                active_count += 1
+                active_lines.extend(self._member_block(active_count, member, trade))
             else:
-                lines.append(_format_trade_line(trade))
-            lines.append("")  # blank line between members
+                inactive_count += 1
+                inactive_lines.extend(self._member_block(inactive_count, member, trade))
 
-        if count == 0:
-            return None, 0
-
-        embed = discord.Embed(
+        inactive_embed = discord.Embed(
             title="Member Inactivity Notice!",
-            description="\n".join(lines).strip(),
+            description=(
+                "\n".join(inactive_lines).strip()
+                if inactive_count
+                else f"Everyone has paid for something within the last {INACTIVITY_THRESHOLD_HOURS} hours! 🎉"
+            ),
             color=EMBED_COLOR,
         )
-        return embed, count
+        active_embed = discord.Embed(
+            title="✅ Active Members",
+            description=(
+                "\n".join(active_lines).strip()
+                if active_count
+                else "No one's currently active."
+            ),
+            color=EMBED_COLOR,
+        )
+        return inactive_embed, active_embed, inactive_count, active_count
 
-    async def _send_report(self) -> int:
-        """Builds and sends the report. Returns the number of inactive members
-        found (0 if the report was skipped — nobody inactive, or channel/guild
-        couldn't be resolved)."""
-        embed, count = await self._build_report_embed()
-        if embed is None:
-            return 0
+    async def _send_report(self):
+        """Builds and sends the report (inactive + active sections as one message).
+        Returns (inactive_count, active_count) — both 0 if the channel/guild
+        couldn't be resolved and nothing was sent."""
+        inactive_embed, active_embed, inactive_count, active_count = await self._build_report_embeds()
+        if inactive_embed is None:
+            return 0, 0
 
         channel = self.bot.get_channel(INACTIVITY_LOG_CHANNEL_ID)
         if channel is None:
             try:
                 channel = await self.bot.fetch_channel(INACTIVITY_LOG_CHANNEL_ID)
             except discord.HTTPException:
-                return 0
+                return 0, 0
 
-        await channel.send(embed=embed)
-        return count
+        await channel.send(embeds=[inactive_embed, active_embed])
+        return inactive_count, active_count
 
     @tasks.loop(hours=INACTIVITY_REPORT_INTERVAL_HOURS)
     async def auto_report_loop(self):
@@ -161,7 +180,7 @@ class Inactivity(commands.Cog):
         await interaction.response.defer(thinking=True, ephemeral=True)
 
         try:
-            count = await self._send_report()
+            inactive_count, active_count = await self._send_report()
         except Exception:
             log.exception("Manual /inactivity database failed")
             await interaction.followup.send(
@@ -170,10 +189,14 @@ class Inactivity(commands.Cog):
             )
             return
 
-        if count == 0:
-            await interaction.followup.send("No one is currently inactive — report not sent.")
+        if inactive_count == 0 and active_count == 0:
+            await interaction.followup.send(
+                "Couldn't find any members to check — see the bot's logs."
+            )
         else:
-            await interaction.followup.send(f"Report sent — {count} inactive member(s).")
+            await interaction.followup.send(
+                f"Report sent — {inactive_count} inactive, {active_count} active."
+            )
 
 
 async def setup(bot: commands.Bot):
