@@ -38,7 +38,8 @@ RULES_BODY = (
 
 AGREE_DISCLAIMER = (
     "By clicking agree that means you agree to all the following rules above and that you "
-    "may not devalue the base by selling it for under the market price"
+    "may not devalue the base by selling it for under the market price and that you will not be given compensatiom if
+    you leave or get kicked from the team."
 )
 
 
