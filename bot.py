@@ -10,6 +10,7 @@ from config import BOT_TOKEN
 logging.basicConfig(level=logging.INFO)
 
 intents = discord.Intents.default()
+intents.members = True  # required for guild.fetch_members() — used by /inactivity and /split reminders
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 INITIAL_COGS = ["wallet", "fund", "split", "payment", "help", "rules", "inactivity"]
