@@ -1,3 +1,4 @@
+
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -38,8 +39,8 @@ RULES_BODY = (
 
 AGREE_DISCLAIMER = (
     "By clicking agree that means you agree to all the following rules above and that you "
-    "may not devalue the base by selling it for under the market price and that you will not be given compensatiom if
-    you leave or get kicked from the team."
+    "may not devalue the base by selling it for under the market price and that you will not "
+    "be given compensation if you leave or get kicked from the team."
 )
 
 
