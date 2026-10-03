@@ -159,7 +159,16 @@ class Inactivity(commands.Cog):
             return
 
         await interaction.response.defer(thinking=True, ephemeral=True)
-        count = await self._send_report()
+
+        try:
+            count = await self._send_report()
+        except Exception:
+            log.exception("Manual /inactivity database failed")
+            await interaction.followup.send(
+                "Something went wrong building the report — check the bot's logs. "
+                "(Common cause: the Members intent isn't enabled in the running deployment.)"
+            )
+            return
 
         if count == 0:
             await interaction.followup.send("No one is currently inactive — report not sent.")
