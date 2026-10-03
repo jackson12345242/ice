@@ -1,3 +1,4 @@
+
 import os
 from dotenv import load_dotenv
 
@@ -31,6 +32,7 @@ SPLIT_TEAM_SIZE = 13  # <-- update this whenever the team size changes
 SPLIT_LOG_CHANNEL_ID = FUND_LOG_CHANNEL_ID  # change this if you want splits logged somewhere else
 SPLIT_PAYMENT_TOLERANCE = 0.03  # 3% wiggle room for price moves / network fees
 SPLIT_PAYMENT_WINDOW_MINUTES = 15  # only count transactions within this many minutes of now
+SPLIT_REMINDER_HOURS = 12  # how long an active split sits unpaid before auto-DMing reminders — confirm this matches your old value
 
 # --- Blockchain lookups ---
 BLOCKCYPHER_TOKEN = os.getenv("BLOCKCYPHER_TOKEN", "")
