@@ -46,10 +46,15 @@ async def init_db():
                 channel_id INTEGER NOT NULL,
                 message_id INTEGER,
                 status TEXT NOT NULL DEFAULT 'active',
+                reminder_sent INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             )
             """
         )
+        try:
+            await db.execute("ALTER TABLE splits ADD COLUMN reminder_sent INTEGER NOT NULL DEFAULT 0")
+        except Exception:
+            pass
         await db.execute(
             """
             CREATE TABLE IF NOT EXISTS split_payments (
@@ -228,7 +233,8 @@ async def set_split_message(split_id: int, message_id: int):
 async def get_active_split():
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
-            "SELECT id, creator_id, brainrot, total_amount, team_size, per_person_amount, channel_id, message_id "
+            "SELECT id, creator_id, brainrot, total_amount, team_size, per_person_amount, channel_id, "
+            "message_id, reminder_sent, created_at "
             "FROM splits WHERE status = 'active' ORDER BY id DESC LIMIT 1"
         )
         row = await cursor.fetchone()
@@ -243,7 +249,15 @@ async def get_active_split():
             "per_person_amount": row[5],
             "channel_id": row[6],
             "message_id": row[7],
+            "reminder_sent": bool(row[8]),
+            "created_at": row[9],
         }
+
+
+async def mark_split_reminder_sent(split_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE splits SET reminder_sent = 1 WHERE id = ?", (split_id,))
+        await db.commit()
 
 
 async def get_split_payment(split_id: int, user_id: int):
