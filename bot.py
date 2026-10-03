@@ -10,14 +10,9 @@ from config import BOT_TOKEN
 logging.basicConfig(level=logging.INFO)
 
 intents = discord.Intents.default()
-# Needed so /reminder send and the 12h auto-reminder can enumerate every server
-# member (to find who hasn't paid). Requires "Server Members Intent" to also be
-# turned on for this bot in the Discord Developer Portal, or the bot will fail
-# to connect once this is set to True.
-intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-INITIAL_COGS = ["wallet", "fund", "split", "payment", "help", "watchlist"]
+INITIAL_COGS = ["wallet", "fund", "split", "payment", "help", "rules"]
 
 
 @bot.event
