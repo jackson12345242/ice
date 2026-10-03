@@ -10,7 +10,6 @@ BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "")
 # --- Fixed IDs from your spec ---
 FUND_LOG_CHANNEL_ID = 1548407028118986923   # every /fund add and /remove fund gets logged here
 FUND_ADMIN_USER_ID = 645395932812279844      # only this user can use /remove fund
-WATCHLIST_ALERT_CHANNEL_ID = 1553456408911937597  # eldorado price-change alerts go here
 
 # --- Brainrot catalog ---
 # key = value used internally / in the DB, label = shown in the dropdown, asset = icon file in /assets
@@ -28,11 +27,10 @@ BRAINROTS = {
 EMBED_COLOR = 0x5865F2  # Discord blurple, matches the reference screenshot
 
 # --- Split settings ---
-SPLIT_TEAM_SIZE = 14 # <-- update this whenever the team size changes
+SPLIT_TEAM_SIZE = 13  # <-- update this whenever the team size changes
 SPLIT_LOG_CHANNEL_ID = FUND_LOG_CHANNEL_ID  # change this if you want splits logged somewhere else
 SPLIT_PAYMENT_TOLERANCE = 0.03  # 3% wiggle room for price moves / network fees
 SPLIT_PAYMENT_WINDOW_MINUTES = 15  # only count transactions within this many minutes of now
-SPLIT_REMINDER_HOURS = 12  # how long after a split starts to auto-DM everyone who hasn't paid
 
 # --- Blockchain lookups ---
 BLOCKCYPHER_TOKEN = os.getenv("BLOCKCYPHER_TOKEN", "")
@@ -51,3 +49,7 @@ PAYMENT_BRAINROTS = {
     "dragon_cannelloni": {"label": "Dragon Cannelloni", "asset": "assets/dragon_cannelloni.png", "tier": 2},
     "garama_madundung": {"label": "Garama / Madundung", "asset": "assets/garama.png", "tier": 1},
 }
+
+# --- Rules ---
+RULES_LOG_CHANNEL_ID = 1555901101319000104  # every rule agreement gets logged here
+RULES_ADMIN_USER_ID = FUND_ADMIN_USER_ID  # only this user can use /rules send
