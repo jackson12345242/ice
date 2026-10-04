@@ -1,7 +1,11 @@
 """
 missing_list.py — paginated "missing brainrots" tracker cog
 
-Command:
+Commands:
+    /addbrainrot brainrot:<name>   Add a new brainrot to the missing list. Case-
+                                    insensitive duplicate check, so retyping an
+                                    existing name (any casing) won't double it up.
+
     /missinglist    Show the missing list as a paginated embed. Items can be
                     marked received two ways:
                       - picking a name from the "Mark Received" dropdown (only
@@ -167,15 +171,47 @@ async def db_get_missing(guild_id: int) -> list[str]:
     def _run():
         conn = _db()
         rows = conn.execute(
-            "SELECT item_name FROM missing_items WHERE guild_id = ? AND status = 'missing'",
+            "SELECT item_name FROM missing_items WHERE guild_id = ? AND status = 'missing' "
+            "ORDER BY rowid",
             (guild_id,),
         ).fetchall()
         conn.close()
-        return {r["item_name"] for r in rows}
+        return [r["item_name"] for r in rows]
 
-    still_missing = await asyncio.to_thread(_run)
-    # Keep the original, stable display order rather than DB/insert order.
-    return [name for name in MISSING_LIST_ITEMS if name in still_missing]
+    all_missing = await asyncio.to_thread(_run)
+    missing_set = set(all_missing)
+    curated_set = set(MISSING_LIST_ITEMS)
+    # Keep the original, stable display order for the curated list, then tack on
+    # anything added later via /addbrainrot (in the order it was added).
+    ordered = [name for name in MISSING_LIST_ITEMS if name in missing_set]
+    extras = [name for name in all_missing if name not in curated_set]
+    return ordered + extras
+
+
+async def db_add_item(guild_id: int, item_name: str) -> tuple[bool, str | None]:
+    """Adds item_name to the list as 'missing'. Matching is case-insensitive so
+    "dragon cannelloni" won't create a duplicate of "Dragon Cannelloni". Returns
+    (added, existing_status) — existing_status is only set when added is False."""
+
+    def _run():
+        conn = _db()
+        existing = conn.execute(
+            "SELECT status FROM missing_items WHERE guild_id = ? AND LOWER(item_name) = LOWER(?)",
+            (guild_id, item_name),
+        ).fetchone()
+        if existing:
+            conn.close()
+            return False, existing["status"]
+        conn.execute(
+            "INSERT INTO missing_items (guild_id, item_name, status, received_by, received_at) "
+            "VALUES (?, ?, 'missing', NULL, NULL)",
+            (guild_id, item_name),
+        )
+        conn.commit()
+        conn.close()
+        return True, None
+
+    return await asyncio.to_thread(_run)
 
 
 async def db_mark_received(guild_id: int, item_name: str, user_id: int) -> bool:
@@ -517,6 +553,17 @@ class MissingList(commands.Cog):
         except discord.HTTPException:
             pass
 
+    async def log_added(self, interaction: discord.Interaction, item_name: str):
+        channel = self.bot.get_channel(FUND_LOG_CHANNEL_ID)
+        if channel is None:
+            return
+        try:
+            await channel.send(
+                f"➕ **{item_name}** added to the missing list by {interaction.user.mention}"
+            )
+        except discord.HTTPException:
+            pass
+
     @app_commands.command(
         name="missinglist", description="View and update the missing brainrots list"
     )
@@ -529,6 +576,35 @@ class MissingList(commands.Cog):
         embed = _build_embed(missing, 0, total_pages)
         await interaction.response.send_message(embed=embed, view=view)
         view.message = await interaction.original_response()
+
+    @app_commands.command(
+        name="addbrainrot", description="Add a new brainrot to the missing list"
+    )
+    @app_commands.describe(brainrot="Name of the brainrot to add")
+    async def addbrainrot(self, interaction: discord.Interaction, brainrot: str):
+        name = brainrot.strip()
+        if not name:
+            await interaction.response.send_message(
+                "Give it an actual name to add.", ephemeral=True
+            )
+            return
+
+        await db_seed_if_needed(interaction.guild_id)
+        added, existing_status = await db_add_item(interaction.guild_id, name)
+
+        if not added:
+            status_word = (
+                "still missing" if existing_status == "missing" else "already marked received"
+            )
+            await interaction.response.send_message(
+                f"**{name}** is already on the list ({status_word}).", ephemeral=True
+            )
+            return
+
+        await self.log_added(interaction, name)
+        await interaction.response.send_message(
+            f"Added **{name}** to the missing list. Run `/missinglist` to see it."
+        )
 
 
 async def setup(bot: commands.Bot):
