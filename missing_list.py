@@ -10,8 +10,10 @@ Command:
                         confirming the closest match (uses difflib, stdlib,
                         no extra dependency) before anything is changed.
                     "Copy Full List" posts the ENTIRE still-missing list (not
-                    just the current page) as a clean, monospaced, easy-to-copy
-                    block, visible only to whoever clicked it.
+                    just the current page) as a plain-text, monospaced code
+                    block in a normal message (not an embed) so it's easy to
+                    long-press/select and copy, especially on mobile. Visible
+                    only to whoever clicked it.
 
 --------------------------------------------------------------------------------
 INTEGRATION
@@ -213,9 +215,10 @@ def _build_embed(missing: list[str], page: int, total_pages: int) -> discord.Emb
     return embed
 
 
-# Discord hard-caps embed descriptions at 4096 characters; leave headroom for the
-# ``` fences and numbering so a single chunk never gets rejected as too long.
-_COPY_CHUNK_CHAR_LIMIT = 3800
+# Plain messages (not embeds) are what's actually easy to long-press/select and
+# copy on mobile Discord. Discord caps message content at 2000 characters; leave
+# headroom for the ``` fences so a single chunk never gets rejected as too long.
+_COPY_CHUNK_CHAR_LIMIT = 1900
 
 
 def _build_copy_chunks(missing: list[str]) -> list[str]:
@@ -343,21 +346,20 @@ class MissingListView(discord.ui.View):
             )
             return
 
-        first_embed = discord.Embed(
-            title=f"Full Missing List ({len(missing)} items)",
-            description=f"```\n{chunks[0]}\n```",
-            color=discord.Color.blurple(),
-        )
+        # Plain message content (not an embed) so it's trivially selectable/copyable,
+        # including on mobile, where text inside embeds is often hard to select.
+        header = f"**Full Missing List ({len(missing)} items)**"
         if len(chunks) > 1:
-            first_embed.set_footer(text=f"Part 1/{len(chunks)}")
-        await interaction.response.send_message(embed=first_embed, ephemeral=True)
+            header += f" — part 1/{len(chunks)}"
+        await interaction.response.send_message(
+            content=f"{header}\n```\n{chunks[0]}\n```", ephemeral=True
+        )
 
         for i, chunk in enumerate(chunks[1:], start=2):
-            part_embed = discord.Embed(
-                description=f"```\n{chunk}\n```", color=discord.Color.blurple()
+            part_header = f"**Full Missing List** — part {i}/{len(chunks)}"
+            await interaction.followup.send(
+                content=f"{part_header}\n```\n{chunk}\n```", ephemeral=True
             )
-            part_embed.set_footer(text=f"Part {i}/{len(chunks)}")
-            await interaction.followup.send(embed=part_embed, ephemeral=True)
 
 
 class TypeReceivedModal(discord.ui.Modal, title="Mark Received"):
