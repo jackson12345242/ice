@@ -14,6 +14,9 @@ Command:
                     block in a normal message (not an embed) so it's easy to
                     long-press/select and copy, especially on mobile. Visible
                     only to whoever clicked it.
+                    "Search" lets you type a full or partial name, jumps the
+                    embed straight to whichever page that item is on, and
+                    marks it with a 👉 so it's easy to spot.
 
 --------------------------------------------------------------------------------
 INTEGRATION
@@ -195,7 +198,9 @@ async def db_mark_received(guild_id: int, item_name: str, user_id: int) -> bool:
 # UI
 # ----------------------------------------------------------------------------
 
-def _build_embed(missing: list[str], page: int, total_pages: int) -> discord.Embed:
+def _build_embed(
+    missing: list[str], page: int, total_pages: int, highlight: str | None = None
+) -> discord.Embed:
     start = page * PAGE_SIZE
     page_items = missing[start : start + PAGE_SIZE]
 
@@ -204,7 +209,10 @@ def _build_embed(missing: list[str], page: int, total_pages: int) -> discord.Emb
         color=discord.Color.blurple(),
     )
     if page_items:
-        lines = [f"{start + i + 1}. {name}" for i, name in enumerate(page_items)]
+        lines = []
+        for i, name in enumerate(page_items):
+            marker = "👉 " if name == highlight else "   "
+            lines.append(f"{marker}{start + i + 1}. {name}")
         embed.description = "```\n" + "\n".join(lines) + "\n```"
     else:
         embed.description = "Nothing missing — everything's been received! 🎉"
@@ -252,6 +260,7 @@ class MissingListView(discord.ui.View):
         self.missing = missing
         self.total_pages = max((len(missing) + PAGE_SIZE - 1) // PAGE_SIZE, 1)
         self.message: discord.Message | None = None  # set by the command after sending
+        self.highlight: str | None = None  # name to mark with 👉 on its page, if any
         self._build_items()
 
     def _build_items(self):
@@ -279,6 +288,10 @@ class MissingListView(discord.ui.View):
         copy_button.callback = self.copy_full_list
         self.add_item(copy_button)
 
+        search_button = discord.ui.Button(label="🔍 Search", style=discord.ButtonStyle.primary)
+        search_button.callback = self.open_search_modal
+        self.add_item(search_button)
+
         start = self.page * PAGE_SIZE
         page_items = self.missing[start : start + PAGE_SIZE]
         if page_items:
@@ -296,33 +309,36 @@ class MissingListView(discord.ui.View):
         self.total_pages = max((len(self.missing) + PAGE_SIZE - 1) // PAGE_SIZE, 1)
         self.page = max(0, min(self.page, self.total_pages - 1))
         self._build_items()
-        embed = _build_embed(self.missing, self.page, self.total_pages)
+        embed = _build_embed(self.missing, self.page, self.total_pages, self.highlight)
         await interaction.response.edit_message(embed=embed, view=self)
 
     async def refresh_message_external(self):
         """Re-render the original /missinglist message from an interaction that
-        isn't attached to it (e.g. a confirmation that came from a modal)."""
+        isn't attached to it (e.g. a confirmation or search result from a modal)."""
         if self.message is None:
             return
         self.missing = await db_get_missing(self.guild_id)
         self.total_pages = max((len(self.missing) + PAGE_SIZE - 1) // PAGE_SIZE, 1)
         self.page = max(0, min(self.page, self.total_pages - 1))
         self._build_items()
-        embed = _build_embed(self.missing, self.page, self.total_pages)
+        embed = _build_embed(self.missing, self.page, self.total_pages, self.highlight)
         try:
             await self.message.edit(embed=embed, view=self)
         except discord.HTTPException:
             pass
 
     async def go_previous(self, interaction: discord.Interaction):
+        self.highlight = None
         self.page = max(0, self.page - 1)
         await self._refresh(interaction)
 
     async def go_next(self, interaction: discord.Interaction):
+        self.highlight = None
         self.page = min(self.total_pages - 1, self.page + 1)
         await self._refresh(interaction)
 
     async def mark_received(self, interaction: discord.Interaction):
+        self.highlight = None
         select = interaction.data.get("values", [])
         if not select:
             await self._refresh(interaction)
@@ -335,6 +351,9 @@ class MissingListView(discord.ui.View):
 
     async def open_type_modal(self, interaction: discord.Interaction):
         await interaction.response.send_modal(TypeReceivedModal(self))
+
+    async def open_search_modal(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(SearchModal(self))
 
     async def copy_full_list(self, interaction: discord.Interaction):
         missing = await db_get_missing(self.guild_id)
@@ -400,6 +419,49 @@ class TypeReceivedModal(discord.ui.Modal, title="Mark Received"):
         )
 
 
+class SearchModal(discord.ui.Modal, title="Search Missing List"):
+    def __init__(self, parent_view: MissingListView):
+        super().__init__()
+        self.parent_view = parent_view
+        self.query_input = discord.ui.TextInput(
+            label="Brainrot name",
+            placeholder="Type all or part of a name...",
+            required=True,
+            max_length=100,
+        )
+        self.add_item(self.query_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        query = self.query_input.value.strip()
+        missing = await db_get_missing(self.parent_view.guild_id)
+        if not missing:
+            await interaction.response.send_message(
+                "Nothing is missing anymore — the list is empty!", ephemeral=True
+            )
+            return
+
+        # Prefer a plain substring match (handles partial names cleanly); fall
+        # back to fuzzy matching for typos, same approach as "Type It".
+        lowered = query.lower()
+        substring_matches = [name for name in missing if lowered in name.lower()]
+        if substring_matches:
+            best = substring_matches[0]
+        else:
+            close = difflib.get_close_matches(query, missing, n=1, cutoff=0.0)
+            best = close[0] if close else missing[0]
+
+        index = missing.index(best)
+        page = index // PAGE_SIZE
+
+        self.parent_view.page = page
+        self.parent_view.highlight = best
+        await self.parent_view.refresh_message_external()
+
+        await interaction.response.send_message(
+            f"Found **{best}** — jumped to page {page + 1}.", ephemeral=True
+        )
+
+
 class ConfirmReceivedView(discord.ui.View):
     def __init__(self, parent_view: MissingListView, item_name: str):
         super().__init__(timeout=60)
@@ -413,6 +475,7 @@ class ConfirmReceivedView(discord.ui.View):
         )
         if updated:
             await self.parent_view.cog.log_received(interaction, self.item_name)
+            self.parent_view.highlight = None
             await interaction.response.edit_message(
                 content=f"Marked **{self.item_name}** as received.", embed=None, view=None
             )
