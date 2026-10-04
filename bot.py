@@ -13,7 +13,9 @@ intents = discord.Intents.default()
 intents.members = True  # required for guild.fetch_members() — used by /inactivity and /split reminders
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-INITIAL_COGS = ["wallet", "fund", "split", "payment", "help", "rules", "inactivity", "watchlist"]
+INITIAL_COGS = ["wallet", "fund", "split", "payment", "help", "rules",
+                "inactivity", "watchlist", "missing_list"]
+
 
 
 @bot.event
