@@ -9,6 +9,9 @@ Command:
                       - clicking "Type It", typing a name in free text, and
                         confirming the closest match (uses difflib, stdlib,
                         no extra dependency) before anything is changed.
+                    "Copy Full List" posts the ENTIRE still-missing list (not
+                    just the current page) as a clean, monospaced, easy-to-copy
+                    block, visible only to whoever clicked it.
 
 --------------------------------------------------------------------------------
 INTEGRATION
@@ -200,7 +203,7 @@ def _build_embed(missing: list[str], page: int, total_pages: int) -> discord.Emb
     )
     if page_items:
         lines = [f"{start + i + 1}. {name}" for i, name in enumerate(page_items)]
-        embed.description = "\n".join(lines)
+        embed.description = "```\n" + "\n".join(lines) + "\n```"
     else:
         embed.description = "Nothing missing — everything's been received! 🎉"
 
@@ -208,6 +211,33 @@ def _build_embed(missing: list[str], page: int, total_pages: int) -> discord.Emb
         text=f"Page {page + 1}/{max(total_pages, 1)} • {len(missing)} still missing"
     )
     return embed
+
+
+# Discord hard-caps embed descriptions at 4096 characters; leave headroom for the
+# ``` fences and numbering so a single chunk never gets rejected as too long.
+_COPY_CHUNK_CHAR_LIMIT = 3800
+
+
+def _build_copy_chunks(missing: list[str]) -> list[str]:
+    """Splits the full missing list into one or more code-block strings, each
+    comfortably under the embed description limit, without cutting a line in half."""
+    if not missing:
+        return []
+
+    lines = [f"{i + 1}. {name}" for i, name in enumerate(missing)]
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+    for line in lines:
+        # +1 for the newline that will join this line to the chunk
+        if current and current_len + len(line) + 1 > _COPY_CHUNK_CHAR_LIMIT:
+            chunks.append("\n".join(current))
+            current, current_len = [], 0
+        current.append(line)
+        current_len += len(line) + 1
+    if current:
+        chunks.append("\n".join(current))
+    return chunks
 
 
 class MissingListView(discord.ui.View):
@@ -241,6 +271,10 @@ class MissingListView(discord.ui.View):
         type_button = discord.ui.Button(label="⌨️ Type It", style=discord.ButtonStyle.primary)
         type_button.callback = self.open_type_modal
         self.add_item(type_button)
+
+        copy_button = discord.ui.Button(label="📋 Copy Full List", style=discord.ButtonStyle.secondary)
+        copy_button.callback = self.copy_full_list
+        self.add_item(copy_button)
 
         start = self.page * PAGE_SIZE
         page_items = self.missing[start : start + PAGE_SIZE]
@@ -298,6 +332,32 @@ class MissingListView(discord.ui.View):
 
     async def open_type_modal(self, interaction: discord.Interaction):
         await interaction.response.send_modal(TypeReceivedModal(self))
+
+    async def copy_full_list(self, interaction: discord.Interaction):
+        missing = await db_get_missing(self.guild_id)
+        chunks = _build_copy_chunks(missing)
+
+        if not chunks:
+            await interaction.response.send_message(
+                "Nothing is missing anymore — the list is empty!", ephemeral=True
+            )
+            return
+
+        first_embed = discord.Embed(
+            title=f"Full Missing List ({len(missing)} items)",
+            description=f"```\n{chunks[0]}\n```",
+            color=discord.Color.blurple(),
+        )
+        if len(chunks) > 1:
+            first_embed.set_footer(text=f"Part 1/{len(chunks)}")
+        await interaction.response.send_message(embed=first_embed, ephemeral=True)
+
+        for i, chunk in enumerate(chunks[1:], start=2):
+            part_embed = discord.Embed(
+                description=f"```\n{chunk}\n```", color=discord.Color.blurple()
+            )
+            part_embed.set_footer(text=f"Part {i}/{len(chunks)}")
+            await interaction.followup.send(embed=part_embed, ephemeral=True)
 
 
 class TypeReceivedModal(discord.ui.Modal, title="Mark Received"):
