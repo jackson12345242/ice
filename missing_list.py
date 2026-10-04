@@ -2,9 +2,13 @@
 missing_list.py — paginated "missing brainrots" tracker cog
 
 Command:
-    /missinglist    Show the missing list as a paginated embed with a dropdown.
-                    Picking an item from the dropdown marks it received and
-                    removes it from the list immediately.
+    /missinglist    Show the missing list as a paginated embed. Items can be
+                    marked received two ways:
+                      - picking a name from the "Mark Received" dropdown (only
+                        lists the current page's items), or
+                      - clicking "Type It", typing a name in free text, and
+                        confirming the closest match (uses difflib, stdlib,
+                        no extra dependency) before anything is changed.
 
 --------------------------------------------------------------------------------
 INTEGRATION
@@ -32,6 +36,7 @@ you don't want that, delete the `_log_received(...)` call in `mark_received`.
 import os
 import sqlite3
 import asyncio
+import difflib
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -213,6 +218,7 @@ class MissingListView(discord.ui.View):
         self.page = page
         self.missing = missing
         self.total_pages = max((len(missing) + PAGE_SIZE - 1) // PAGE_SIZE, 1)
+        self.message: discord.Message | None = None  # set by the command after sending
         self._build_items()
 
     def _build_items(self):
@@ -231,6 +237,10 @@ class MissingListView(discord.ui.View):
         )
         next_button.callback = self.go_next
         self.add_item(next_button)
+
+        type_button = discord.ui.Button(label="⌨️ Type It", style=discord.ButtonStyle.primary)
+        type_button.callback = self.open_type_modal
+        self.add_item(type_button)
 
         start = self.page * PAGE_SIZE
         page_items = self.missing[start : start + PAGE_SIZE]
@@ -252,6 +262,21 @@ class MissingListView(discord.ui.View):
         embed = _build_embed(self.missing, self.page, self.total_pages)
         await interaction.response.edit_message(embed=embed, view=self)
 
+    async def refresh_message_external(self):
+        """Re-render the original /missinglist message from an interaction that
+        isn't attached to it (e.g. a confirmation that came from a modal)."""
+        if self.message is None:
+            return
+        self.missing = await db_get_missing(self.guild_id)
+        self.total_pages = max((len(self.missing) + PAGE_SIZE - 1) // PAGE_SIZE, 1)
+        self.page = max(0, min(self.page, self.total_pages - 1))
+        self._build_items()
+        embed = _build_embed(self.missing, self.page, self.total_pages)
+        try:
+            await self.message.edit(embed=embed, view=self)
+        except discord.HTTPException:
+            pass
+
     async def go_previous(self, interaction: discord.Interaction):
         self.page = max(0, self.page - 1)
         await self._refresh(interaction)
@@ -270,6 +295,81 @@ class MissingListView(discord.ui.View):
         if updated:
             await self.cog.log_received(interaction, item_name)
         await self._refresh(interaction)
+
+    async def open_type_modal(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(TypeReceivedModal(self))
+
+
+class TypeReceivedModal(discord.ui.Modal, title="Mark Received"):
+    def __init__(self, parent_view: MissingListView):
+        super().__init__()
+        self.parent_view = parent_view
+        self.name_input = discord.ui.TextInput(
+            label="Brainrot name",
+            placeholder="Type the name, even if you're not 100% sure of spelling...",
+            required=True,
+            max_length=100,
+        )
+        self.add_item(self.name_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        typed = self.name_input.value.strip()
+        missing = await db_get_missing(self.parent_view.guild_id)
+        if not missing:
+            await interaction.response.send_message(
+                "Nothing is missing anymore — the list is empty!", ephemeral=True
+            )
+            return
+
+        match = difflib.get_close_matches(typed, missing, n=1, cutoff=0.0)
+        best = match[0] if match else missing[0]
+
+        embed = discord.Embed(
+            title="Confirm Match",
+            description=(
+                f"The brainrot you are marking received is this:\n\n**{best}**\n\n"
+                f"Confirm if this is right!"
+            ),
+            color=discord.Color.blurple(),
+        )
+        embed.set_footer(text=f"You typed: {typed}")
+        await interaction.response.send_message(
+            embed=embed, view=ConfirmReceivedView(self.parent_view, best), ephemeral=True
+        )
+
+
+class ConfirmReceivedView(discord.ui.View):
+    def __init__(self, parent_view: MissingListView, item_name: str):
+        super().__init__(timeout=60)
+        self.parent_view = parent_view
+        self.item_name = item_name
+
+    @discord.ui.button(label="✅ Confirm", style=discord.ButtonStyle.success)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        updated = await db_mark_received(
+            self.parent_view.guild_id, self.item_name, interaction.user.id
+        )
+        if updated:
+            await self.parent_view.cog.log_received(interaction, self.item_name)
+            await interaction.response.edit_message(
+                content=f"Marked **{self.item_name}** as received.", embed=None, view=None
+            )
+            await self.parent_view.refresh_message_external()
+        else:
+            await interaction.response.edit_message(
+                content=(
+                    f"**{self.item_name}** was already marked received (maybe by someone else "
+                    f"just now) — nothing changed."
+                ),
+                embed=None,
+                view=None,
+            )
+
+    @discord.ui.button(label="❌ Cancel", style=discord.ButtonStyle.danger)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content="Cancelled — nothing was marked received.", embed=None, view=None
+        )
 
 
 # ----------------------------------------------------------------------------
@@ -303,6 +403,7 @@ class MissingList(commands.Cog):
         view = MissingListView(self, interaction.guild_id, 0, missing)
         embed = _build_embed(missing, 0, total_pages)
         await interaction.response.send_message(embed=embed, view=view)
+        view.message = await interaction.original_response()
 
 
 async def setup(bot: commands.Bot):
