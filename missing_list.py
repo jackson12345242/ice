@@ -106,6 +106,22 @@ def _init_db():
             (new, old),
         )
         conn.execute("DELETE FROM missing_items WHERE item_name = ?", (old,))
+
+    # One-time purge: remove every row that isn't in MISSING_LIST_ITEMS so the
+    # list is exactly the curated names. Runs once (tracked by a flag), so
+    # anything added later with /addbrainrot is NOT wiped on future restarts.
+    conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY)")
+    already_purged = conn.execute(
+        "SELECT 1 FROM meta WHERE key = 'list_reset_v1'"
+    ).fetchone()
+    if not already_purged:
+        placeholders = ",".join("?" for _ in MISSING_LIST_ITEMS)
+        conn.execute(
+            f"DELETE FROM missing_items WHERE item_name NOT IN ({placeholders})",
+            MISSING_LIST_ITEMS,
+        )
+        conn.execute("INSERT INTO meta (key) VALUES ('list_reset_v1')")
+
     conn.commit()
     conn.close()
 
