@@ -38,7 +38,8 @@ pattern as watchlist.py) so it does NOT touch your existing database.py.
 Each server (guild) gets the full list seeded the first time /missinglist is run
 there. If you ever update MISSING_LIST_ITEMS below, newly added names will get
 seeded in automatically next time /missinglist runs; renaming/removing names
-won't retroactively touch rows already in the DB.
+won't retroactively touch rows already in the DB (except for the one-time
+spelling renames handled in _init_db).
 
 Marking an item received also posts a short log line to FUND_LOG_CHANNEL_ID
 (from config.py), matching the logging pattern the rest of your bot uses. If
@@ -62,7 +63,16 @@ from config import FUND_LOG_CHANNEL_ID
 # The full list, in the order you gave it. This is the order items are shown in.
 # ----------------------------------------------------------------------------
 MISSING_LIST_ITEMS = [
-"Nooo My Hotspot", "Zebrino Pianino", "John Doe", "Noo My Examen", "Noo my Resume", "Coco and Mango", "Graipatron", "Guest 666", "Rubrikiko", "Cobra Gelato", "La Food Combinasion", "Scarino Crowino", "Slushi Huski"
+    "Nooo My Hotspot", "Zebrino Pianino", "John Doe", "Noo my Examen", "Noo my Resume",
+    "Coco and Mango", "Grabatron", "Guest 666", "Rubrikiko", "Cobra Gelato",
+    "La Food Combinasion", "Scarino Crowino", "Slushi Huski"
+]
+
+# Old spelling -> corrected spelling. Applied once on startup so existing rows
+# keep their received status instead of showing up as duplicates/extras.
+SPELLING_RENAMES = [
+    ("Noo My Examen", "Noo my Examen"),
+    ("Graipatron", "Grabatron"),
 ]
 
 PAGE_SIZE = 20  # also the max dropdown options per page (Discord's select cap is 25)
@@ -89,6 +99,13 @@ def _init_db():
         )
         """
     )
+    # One-time renames for corrected spellings
+    for old, new in SPELLING_RENAMES:
+        conn.execute(
+            "UPDATE OR IGNORE missing_items SET item_name = ? WHERE item_name = ?",
+            (new, old),
+        )
+        conn.execute("DELETE FROM missing_items WHERE item_name = ?", (old,))
     conn.commit()
     conn.close()
 
